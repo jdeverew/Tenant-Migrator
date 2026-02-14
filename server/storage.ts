@@ -1,38 +1,121 @@
-import { type User, type InsertUser } from "@shared/schema";
-import { randomUUID } from "crypto";
-
-// modify the interface with any CRUD methods
-// you might need
+import { db } from "./db";
+import {
+  migrationProjects,
+  migrationItems,
+  type Project,
+  type InsertProject,
+  type MigrationItem,
+  type InsertMigrationItem,
+  type UpdateProjectRequest,
+  type UpdateItemRequest
+} from "@shared/schema";
+import { eq, desc, and, count } from "drizzle-orm";
 
 export interface IStorage {
-  getUser(id: string): Promise<User | undefined>;
-  getUserByUsername(username: string): Promise<User | undefined>;
-  createUser(user: InsertUser): Promise<User>;
+  // Projects
+  getProjects(userId?: string): Promise<Project[]>;
+  getProject(id: number): Promise<Project | undefined>;
+  createProject(project: InsertProject): Promise<Project>;
+  updateProject(id: number, updates: UpdateProjectRequest): Promise<Project>;
+  deleteProject(id: number): Promise<void>;
+  
+  // Project Stats
+  getProjectStats(projectId: number): Promise<{
+    total: number;
+    pending: number;
+    inProgress: number;
+    completed: number;
+    failed: number;
+  }>;
+
+  // Items
+  getItems(projectId: number): Promise<MigrationItem[]>;
+  createItem(item: InsertMigrationItem): Promise<MigrationItem>;
+  updateItem(id: number, updates: UpdateItemRequest): Promise<MigrationItem>;
+  deleteItem(id: number): Promise<void>;
 }
 
-export class MemStorage implements IStorage {
-  private users: Map<string, User>;
-
-  constructor() {
-    this.users = new Map();
+export class DatabaseStorage implements IStorage {
+  async getProjects(userId?: string): Promise<Project[]> {
+    if (userId) {
+      return await db.select().from(migrationProjects).where(eq(migrationProjects.userId, userId)).orderBy(desc(migrationProjects.createdAt));
+    }
+    return await db.select().from(migrationProjects).orderBy(desc(migrationProjects.createdAt));
   }
 
-  async getUser(id: string): Promise<User | undefined> {
-    return this.users.get(id);
+  async getProject(id: number): Promise<Project | undefined> {
+    const [project] = await db.select().from(migrationProjects).where(eq(migrationProjects.id, id));
+    return project;
   }
 
-  async getUserByUsername(username: string): Promise<User | undefined> {
-    return Array.from(this.users.values()).find(
-      (user) => user.username === username,
-    );
+  async createProject(project: InsertProject): Promise<Project> {
+    const [newProject] = await db.insert(migrationProjects).values(project).returning();
+    return newProject;
   }
 
-  async createUser(insertUser: InsertUser): Promise<User> {
-    const id = randomUUID();
-    const user: User = { ...insertUser, id };
-    this.users.set(id, user);
-    return user;
+  async updateProject(id: number, updates: UpdateProjectRequest): Promise<Project> {
+    const [updated] = await db.update(migrationProjects)
+      .set(updates)
+      .where(eq(migrationProjects.id, id))
+      .returning();
+    return updated;
+  }
+
+  async deleteProject(id: number): Promise<void> {
+    // Delete items first (cascade simulation if needed, but ideally DB handles this via foreign keys if configured, 
+    // strictly speaking we should delete items first to be safe or use ON DELETE CASCADE in schema)
+    await db.delete(migrationItems).where(eq(migrationItems.projectId, id));
+    await db.delete(migrationProjects).where(eq(migrationProjects.id, id));
+  }
+
+  async getProjectStats(projectId: number) {
+    const items = await db.select({
+      status: migrationItems.status,
+      count: count(),
+    })
+    .from(migrationItems)
+    .where(eq(migrationItems.projectId, projectId))
+    .groupBy(migrationItems.status);
+
+    const stats = {
+      total: 0,
+      pending: 0,
+      inProgress: 0,
+      completed: 0,
+      failed: 0,
+    };
+
+    items.forEach(item => {
+      stats.total += item.count;
+      if (item.status === 'pending') stats.pending = item.count;
+      else if (item.status === 'in_progress') stats.inProgress = item.count;
+      else if (item.status === 'completed') stats.completed = item.count;
+      else if (item.status === 'failed') stats.failed = item.count;
+    });
+
+    return stats;
+  }
+
+  async getItems(projectId: number): Promise<MigrationItem[]> {
+    return await db.select().from(migrationItems).where(eq(migrationItems.projectId, projectId));
+  }
+
+  async createItem(item: InsertMigrationItem): Promise<MigrationItem> {
+    const [newItem] = await db.insert(migrationItems).values(item).returning();
+    return newItem;
+  }
+
+  async updateItem(id: number, updates: UpdateItemRequest): Promise<MigrationItem> {
+    const [updated] = await db.update(migrationItems)
+      .set({ ...updates, updatedAt: new Date() })
+      .where(eq(migrationItems.id, id))
+      .returning();
+    return updated;
+  }
+
+  async deleteItem(id: number): Promise<void> {
+    await db.delete(migrationItems).where(eq(migrationItems.id, id));
   }
 }
 
-export const storage = new MemStorage();
+export const storage = new DatabaseStorage();
