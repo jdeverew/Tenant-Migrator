@@ -12,6 +12,10 @@ export const migrationProjects = pgTable("migration_projects", {
   name: text("name").notNull(),
   sourceTenantId: text("source_tenant_id").notNull(),
   targetTenantId: text("target_tenant_id").notNull(),
+  sourceClientId: text("source_client_id"),
+  sourceClientSecret: text("source_client_secret"),
+  targetClientId: text("target_client_id"),
+  targetClientSecret: text("target_client_secret"),
   status: text("status").default("draft").notNull(), // draft, active, completed, archived
   description: text("description"),
   userId: text("user_id").references(() => users.id), // Owner of the project
