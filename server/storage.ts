@@ -30,8 +30,10 @@ export interface IStorage {
 
   // Items
   getItems(projectId: number): Promise<MigrationItem[]>;
+  getItem(id: number): Promise<MigrationItem | undefined>;
   createItem(item: InsertMigrationItem): Promise<MigrationItem>;
   updateItem(id: number, updates: UpdateItemRequest): Promise<MigrationItem>;
+  updateItemLogs(id: number, logs: string[]): Promise<void>;
   deleteItem(id: number): Promise<void>;
 }
 
@@ -100,6 +102,11 @@ export class DatabaseStorage implements IStorage {
     return await db.select().from(migrationItems).where(eq(migrationItems.projectId, projectId));
   }
 
+  async getItem(id: number): Promise<MigrationItem | undefined> {
+    const [item] = await db.select().from(migrationItems).where(eq(migrationItems.id, id));
+    return item;
+  }
+
   async createItem(item: InsertMigrationItem): Promise<MigrationItem> {
     const [newItem] = await db.insert(migrationItems).values(item).returning();
     return newItem;
@@ -111,6 +118,12 @@ export class DatabaseStorage implements IStorage {
       .where(eq(migrationItems.id, id))
       .returning();
     return updated;
+  }
+
+  async updateItemLogs(id: number, logs: string[]): Promise<void> {
+    await db.update(migrationItems)
+      .set({ logs, updatedAt: new Date() })
+      .where(eq(migrationItems.id, id));
   }
 
   async deleteItem(id: number): Promise<void> {

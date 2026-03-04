@@ -5,6 +5,7 @@ import { setupAuth, registerAuthRoutes } from "./replit_integrations/auth";
 import { api } from "@shared/routes";
 import { z } from "zod";
 import type { Project } from "@shared/schema";
+import { migrateItem, migrateAllPending } from "./services/migration-engine";
 
 function maskSecret(value: string | null): string | null {
   if (!value) return null;
@@ -119,6 +120,56 @@ export async function registerRoutes(
   app.delete(api.items.delete.path, async (req, res) => {
     await storage.deleteItem(Number(req.params.id));
     res.status(204).end();
+  });
+
+  // === Migration Endpoints ===
+  app.post('/api/projects/:projectId/items/:itemId/migrate', async (req, res) => {
+    try {
+      const projectId = Number(req.params.projectId);
+      const itemId = Number(req.params.itemId);
+
+      const project = await storage.getProject(projectId);
+      if (!project) return res.status(404).json({ message: 'Project not found' });
+
+      const item = await storage.getItem(itemId);
+      if (!item || item.projectId !== projectId) return res.status(404).json({ message: 'Item not found' });
+
+      if (item.status === 'in_progress') {
+        return res.status(409).json({ message: 'Migration already in progress for this item' });
+      }
+
+      migrateItem(projectId, itemId).catch(err => {
+        console.error(`Background migration failed for item ${itemId}:`, err.message);
+      });
+
+      res.json({ message: 'Migration started', itemId });
+    } catch (err: any) {
+      res.status(500).json({ message: err.message || 'Internal server error' });
+    }
+  });
+
+  app.post('/api/projects/:projectId/migrate-all', async (req, res) => {
+    try {
+      const projectId = Number(req.params.projectId);
+
+      const project = await storage.getProject(projectId);
+      if (!project) return res.status(404).json({ message: 'Project not found' });
+
+      const result = await migrateAllPending(projectId);
+      res.json({
+        message: `Started migration for ${result.started} items`,
+        started: result.started,
+        errors: result.errors,
+      });
+    } catch (err: any) {
+      res.status(500).json({ message: err.message || 'Internal server error' });
+    }
+  });
+
+  app.get('/api/items/:id/logs', async (req, res) => {
+    const item = await storage.getItem(Number(req.params.id));
+    if (!item) return res.status(404).json({ message: 'Item not found' });
+    res.json({ logs: item.logs || [] });
   });
 
   // === Test Connection ===

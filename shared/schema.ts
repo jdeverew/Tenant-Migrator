@@ -28,7 +28,7 @@ export const migrationItems = pgTable("migration_items", {
   projectId: integer("project_id").notNull().references(() => migrationProjects.id),
   sourceIdentity: text("source_identity").notNull(), // e.g. user@source.com
   targetIdentity: text("target_identity"), // e.g. user@target.com
-  itemType: text("item_type").default("mailbox").notNull(), // mailbox, onedrive, teams
+  itemType: text("item_type").default("mailbox").notNull(), // mailbox, onedrive, sharepoint, teams
   status: text("status").default("pending").notNull(), // pending, in_progress, completed, failed
   errorDetails: text("error_details"),
   logs: jsonb("logs").$type<string[]>(), // Array of log strings
