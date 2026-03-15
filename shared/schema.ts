@@ -1,4 +1,4 @@
-import { pgTable, text, serial, integer, bigint, timestamp, jsonb } from "drizzle-orm/pg-core";
+import { pgTable, text, serial, integer, bigint, timestamp, jsonb, boolean } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 import { users } from "./models/auth";
@@ -18,20 +18,28 @@ export const migrationProjects = pgTable("migration_projects", {
   targetClientSecret: text("target_client_secret"),
   status: text("status").default("draft").notNull(), // draft, active, completed, archived
   description: text("description"),
-  userId: text("user_id").references(() => users.id), // Owner of the project
+  userId: text("user_id").references(() => users.id),
   createdAt: timestamp("created_at").defaultNow(),
+  // On-premises Active Directory connection settings
+  adDcHostname: text("ad_dc_hostname"),
+  adLdapPort: integer("ad_ldap_port").default(389),
+  adBindDn: text("ad_bind_dn"),
+  adBindPassword: text("ad_bind_password"),
+  adBaseDn: text("ad_base_dn"),
+  adUseSsl: boolean("ad_use_ssl").default(false),
+  adTargetOu: text("ad_target_ou"),
 });
 
 // === MIGRATION ITEMS (Users/Resources to migrate) ===
 export const migrationItems = pgTable("migration_items", {
   id: serial("id").primaryKey(),
   projectId: integer("project_id").notNull().references(() => migrationProjects.id),
-  sourceIdentity: text("source_identity").notNull(), // e.g. user@source.com
-  targetIdentity: text("target_identity"), // e.g. user@target.com
-  itemType: text("item_type").default("mailbox").notNull(), // mailbox, onedrive, sharepoint, teams
-  status: text("status").default("pending").notNull(), // pending, in_progress, completed, failed
+  sourceIdentity: text("source_identity").notNull(),
+  targetIdentity: text("target_identity"),
+  itemType: text("item_type").default("mailbox").notNull(),
+  status: text("status").default("pending").notNull(),
   errorDetails: text("error_details"),
-  logs: jsonb("logs").$type<string[]>(), // Array of log strings
+  logs: jsonb("logs").$type<string[]>(),
   bytesTotal: bigint("bytes_total", { mode: "number" }),
   bytesMigrated: bigint("bytes_migrated", { mode: "number" }),
   progressPercent: integer("progress_percent"),
@@ -64,7 +72,6 @@ export type InsertProject = z.infer<typeof insertProjectSchema>;
 export type MigrationItem = typeof migrationItems.$inferSelect;
 export type InsertMigrationItem = z.infer<typeof insertItemSchema>;
 
-// API Request/Response Types
 export type CreateProjectRequest = InsertProject;
 export type UpdateProjectRequest = Partial<InsertProject>;
 

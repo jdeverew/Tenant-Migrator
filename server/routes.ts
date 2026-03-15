@@ -8,6 +8,7 @@ import type { Project } from "@shared/schema";
 import { migrateItem, migrateAllPending } from "./services/migration-engine";
 import { GraphClient } from "./services/graph-client";
 import { discoverUsers, discoverSharePointSites, discoverTeams, discoverPowerPlatform } from "./services/discovery-service";
+import { discoverCloudOnlyUsers, testAdConnection, migrateUserToAd, generatePowerShellScript, type AdConnectionConfig } from "./services/entra-ad-service";
 
 function maskSecret(value: string | null): string | null {
   if (!value) return null;
@@ -20,6 +21,7 @@ function sanitizeProject(project: Project) {
     ...project,
     sourceClientSecret: maskSecret(project.sourceClientSecret),
     targetClientSecret: maskSecret(project.targetClientSecret),
+    adBindPassword: maskSecret(project.adBindPassword),
   };
 }
 
@@ -328,6 +330,180 @@ export async function registerRoutes(
         }))
       );
       res.json(results);
+    } catch (err: any) {
+      res.status(500).json({ message: err.message });
+    }
+  });
+
+  // ===================== ENTRA → AD ROUTES =====================
+
+  // Save AD connection settings for a project
+  app.post('/api/projects/:id/ad-settings', requireAuth, async (req, res) => {
+    try {
+      const projectId = parseInt(req.params['id'] as string);
+      const { adDcHostname, adLdapPort, adBindDn, adBindPassword, adBaseDn, adUseSsl, adTargetOu } = req.body;
+      const updated = await storage.updateProject(projectId, {
+        adDcHostname: adDcHostname || null,
+        adLdapPort: adLdapPort ? parseInt(adLdapPort) : 389,
+        adBindDn: adBindDn || null,
+        adBindPassword: adBindPassword || null,
+        adBaseDn: adBaseDn || null,
+        adUseSsl: !!adUseSsl,
+        adTargetOu: adTargetOu || null,
+      });
+      res.json({
+        ...updated,
+        adBindPassword: updated.adBindPassword ? '••••••••' : null,
+      });
+    } catch (err: any) {
+      res.status(500).json({ message: err.message });
+    }
+  });
+
+  // Test AD connection
+  app.post('/api/projects/:id/ad-test-connection', requireAuth, async (req, res) => {
+    try {
+      const projectId = parseInt(req.params['id'] as string);
+      const project = await storage.getProject(projectId);
+      if (!project) return res.status(404).json({ message: 'Project not found' });
+
+      const { adDcHostname, adLdapPort, adBindDn, adBindPassword, adBaseDn, adUseSsl } = req.body;
+      const dcHostname = adDcHostname || project.adDcHostname;
+      const ldapPort = adLdapPort ? parseInt(adLdapPort) : (project.adLdapPort || 389);
+      const bindDn = adBindDn || project.adBindDn;
+      const bindPassword = adBindPassword || project.adBindPassword;
+      const baseDn = adBaseDn || project.adBaseDn;
+      const useSsl = adUseSsl !== undefined ? !!adUseSsl : (project.adUseSsl || false);
+
+      if (!dcHostname || !bindDn || !bindPassword || !baseDn) {
+        return res.status(400).json({ message: 'DC hostname, Bind DN, password, and Base DN are required to test the connection.' });
+      }
+
+      const result = await testAdConnection({ dcHostname, ldapPort, bindDn, bindPassword, baseDn, useSsl });
+      res.json(result);
+    } catch (err: any) {
+      res.status(500).json({ message: err.message || 'Connection test failed' });
+    }
+  });
+
+  // Discover cloud-only Entra users
+  app.get('/api/projects/:id/entra-ad/discover', requireAuth, async (req, res) => {
+    try {
+      const projectId = parseInt(req.params['id'] as string);
+      const project = await storage.getProject(projectId);
+      if (!project) return res.status(404).json({ message: 'Project not found' });
+
+      if (!project.sourceTenantId || !project.sourceClientId || !project.sourceClientSecret) {
+        return res.status(400).json({ message: 'Source tenant credentials are required. Configure them in the Tenant Configuration tab.' });
+      }
+
+      const client = new GraphClient(project.sourceTenantId, project.sourceClientId, project.sourceClientSecret);
+      const users = await discoverCloudOnlyUsers(client);
+      res.json({ users });
+    } catch (err: any) {
+      res.status(500).json({ message: err.message || 'Discovery failed' });
+    }
+  });
+
+  // Migrate selected users to on-premises AD
+  app.post('/api/projects/:id/entra-ad/migrate', requireAuth, async (req, res) => {
+    try {
+      const projectId = parseInt(req.params['id'] as string);
+      const project = await storage.getProject(projectId);
+      if (!project) return res.status(404).json({ message: 'Project not found' });
+
+      const { users } = req.body as { users: Array<{ upn: string; targetUpn: string; displayName: string; givenName?: string; surname?: string; jobTitle?: string; department?: string; officeLocation?: string; mobilePhone?: string; mail?: string }> };
+      if (!Array.isArray(users) || users.length === 0) {
+        return res.status(400).json({ message: 'No users provided for migration' });
+      }
+
+      if (!project.adDcHostname || !project.adBindDn || !project.adBindPassword || !project.adBaseDn) {
+        return res.status(400).json({ message: 'Active Directory connection settings are not configured for this project.' });
+      }
+
+      const config: AdConnectionConfig = {
+        dcHostname: project.adDcHostname,
+        ldapPort: project.adLdapPort || 389,
+        bindDn: project.adBindDn,
+        bindPassword: project.adBindPassword,
+        baseDn: project.adBaseDn,
+        useSsl: project.adUseSsl || false,
+        targetOu: project.adTargetOu,
+      };
+
+      const results = [];
+      for (const u of users) {
+        const entraUser = {
+          id: u.upn,
+          displayName: u.displayName,
+          userPrincipalName: u.upn,
+          mail: u.mail || null,
+          givenName: u.givenName || null,
+          surname: u.surname || null,
+          jobTitle: u.jobTitle || null,
+          department: u.department || null,
+          officeLocation: u.officeLocation || null,
+          mobilePhone: u.mobilePhone || null,
+          accountEnabled: true,
+          usageLocation: null,
+        };
+        const result = await migrateUserToAd(config, entraUser, u.targetUpn || u.upn);
+        results.push(result);
+
+        // Create migration item record
+        await storage.createItem({
+          projectId,
+          sourceIdentity: u.upn,
+          targetIdentity: u.targetUpn || u.upn,
+          itemType: 'entra_to_ad',
+          status: result.success ? 'completed' : 'failed',
+          errorDetails: result.success ? null : result.message,
+          logs: [result.message, ...(result.tempPassword ? [`Temporary password: ${result.tempPassword}`] : [])],
+        } as any);
+      }
+
+      res.json({ results });
+    } catch (err: any) {
+      res.status(500).json({ message: err.message || 'Migration failed' });
+    }
+  });
+
+  // Generate PowerShell export script
+  app.post('/api/projects/:id/entra-ad/export-ps', requireAuth, async (req, res) => {
+    try {
+      const projectId = parseInt(req.params['id'] as string);
+      const project = await storage.getProject(projectId);
+      if (!project) return res.status(404).json({ message: 'Project not found' });
+
+      const { users } = req.body as { users: Array<{ upn: string; targetUpn: string; displayName: string; givenName?: string; surname?: string; jobTitle?: string; department?: string; officeLocation?: string; mobilePhone?: string; mail?: string }> };
+      if (!Array.isArray(users) || users.length === 0) {
+        return res.status(400).json({ message: 'No users provided' });
+      }
+
+      const entraUsers = users.map(u => ({
+        id: u.upn,
+        displayName: u.displayName,
+        userPrincipalName: u.upn,
+        mail: u.mail || null,
+        givenName: u.givenName || null,
+        surname: u.surname || null,
+        jobTitle: u.jobTitle || null,
+        department: u.department || null,
+        officeLocation: u.officeLocation || null,
+        mobilePhone: u.mobilePhone || null,
+        accountEnabled: true,
+        usageLocation: null,
+      }));
+
+      const targetUpns = users.map(u => u.targetUpn || u.upn);
+      const script = generatePowerShellScript(entraUsers, targetUpns, {
+        baseDn: project.adBaseDn || 'DC=corp,DC=com',
+        targetOu: project.adTargetOu,
+      });
+
+      res.setHeader('Content-Type', 'text/plain');
+      res.setHeader('Content-Disposition', `attachment; filename="migrate-entra-to-ad-${Date.now()}.ps1"`);
+      res.send(script);
     } catch (err: any) {
       res.status(500).json({ message: err.message });
     }

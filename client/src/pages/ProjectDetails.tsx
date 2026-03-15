@@ -3,7 +3,7 @@ import { useProject, useProjectStats, useUpdateProject } from "@/hooks/use-proje
 import { useMigrationItems, useCreateMigrationItem, useUpdateMigrationItem, useDeleteMigrationItem } from "@/hooks/use-items";
 import { Sidebar } from "@/components/Sidebar";
 import { StatusBadge } from "@/components/StatusBadge";
-import { Loader2, ArrowLeft, Mail, Cloud, Users, Plus, Trash2, RotateCw, Eye, EyeOff, CheckCircle2, XCircle, Shield, ExternalLink, Play, PlayCircle, FileText, Globe, KeyRound, Search, UserCheck, MapPin, Zap, AlertTriangle, Import, Boxes } from "lucide-react";
+import { Loader2, ArrowLeft, Mail, Cloud, Users, Plus, Trash2, RotateCw, Eye, EyeOff, CheckCircle2, XCircle, Shield, ExternalLink, Play, PlayCircle, FileText, Globe, KeyRound, Search, UserCheck, MapPin, Zap, AlertTriangle, Import, Boxes, Server, Download, Terminal } from "lucide-react";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -223,6 +223,7 @@ export default function ProjectDetails() {
               <TabsTrigger value="items" data-testid="tab-items">Migration Items</TabsTrigger>
               <TabsTrigger value="discovery" data-testid="tab-discovery">Discovery</TabsTrigger>
               <TabsTrigger value="mapping" data-testid="tab-mapping">Auto-Mapping Rules</TabsTrigger>
+              <TabsTrigger value="entra-to-ad" data-testid="tab-entra-to-ad">Entra → AD</TabsTrigger>
               <TabsTrigger value="tenant-config" data-testid="tab-tenant-config">Tenant Configuration</TabsTrigger>
             </TabsList>
 
@@ -474,6 +475,10 @@ export default function ProjectDetails() {
 
             <TabsContent value="mapping">
               <MappingRulesTab projectId={id} />
+            </TabsContent>
+
+            <TabsContent value="entra-to-ad">
+              <EntraToAdTab projectId={id} project={project} />
             </TabsContent>
 
             <TabsContent value="tenant-config">
@@ -1121,6 +1126,519 @@ function MappingRulesTab({ projectId }: { projectId: number }) {
           )}
         </CardContent>
       </Card>
+    </div>
+  );
+}
+
+// ======================== ENTRA → AD TAB ========================
+
+interface EntraCloudUser {
+  id: string;
+  displayName: string;
+  userPrincipalName: string;
+  mail: string | null;
+  givenName: string | null;
+  surname: string | null;
+  jobTitle: string | null;
+  department: string | null;
+  officeLocation: string | null;
+  mobilePhone: string | null;
+  accountEnabled: boolean;
+}
+
+interface AdMigrationResult {
+  userPrincipalName: string;
+  success: boolean;
+  created: boolean;
+  message: string;
+  tempPassword?: string;
+}
+
+function EntraToAdTab({ projectId, project }: { projectId: number; project: any }) {
+  const { toast } = useToast();
+  const queryClient = useQueryClient();
+
+  // AD connection form state — initialised from project
+  const [dcHostname, setDcHostname] = useState(project.adDcHostname || '');
+  const [ldapPort, setLdapPort] = useState(String(project.adLdapPort || '389'));
+  const [bindDn, setBindDn] = useState(project.adBindDn || '');
+  const [bindPassword, setBindPassword] = useState('');
+  const [baseDn, setBaseDn] = useState(project.adBaseDn || '');
+  const [useSsl, setUseSsl] = useState(project.adUseSsl || false);
+  const [targetOu, setTargetOu] = useState(project.adTargetOu || '');
+  const [showAdPassword, setShowAdPassword] = useState(false);
+  const [savingSettings, setSavingSettings] = useState(false);
+  const [testingConn, setTestingConn] = useState(false);
+  const [connResult, setConnResult] = useState<{ success: boolean; message: string } | null>(null);
+
+  // Discovery state
+  const [discovering, setDiscovering] = useState(false);
+  const [discoveredUsers, setDiscoveredUsers] = useState<EntraCloudUser[]>([]);
+  const [discoveryError, setDiscoveryError] = useState<string | null>(null);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [targetUpns, setTargetUpns] = useState<Record<string, string>>({});
+  const [filterText, setFilterText] = useState('');
+
+  // Migration state
+  const [migrating, setMigrating] = useState(false);
+  const [exporting, setExporting] = useState(false);
+  const [migrationResults, setMigrationResults] = useState<AdMigrationResult[]>([]);
+
+  const hasAdSettings = !!(project.adDcHostname && project.adBindDn && project.adBaseDn);
+
+  const handleSaveSettings = async () => {
+    setSavingSettings(true);
+    setConnResult(null);
+    try {
+      await apiRequest('POST', `/api/projects/${projectId}/ad-settings`, {
+        adDcHostname: dcHostname || null,
+        adLdapPort: parseInt(ldapPort) || 389,
+        adBindDn: bindDn || null,
+        adBindPassword: bindPassword || undefined,
+        adBaseDn: baseDn || null,
+        adUseSsl: useSsl,
+        adTargetOu: targetOu || null,
+      });
+      queryClient.invalidateQueries({ queryKey: ['/api/projects', projectId] });
+      toast({ title: 'Saved', description: 'Active Directory settings saved.' });
+      setBindPassword('');
+    } catch (err: any) {
+      toast({ title: 'Error', description: err.message, variant: 'destructive' });
+    } finally {
+      setSavingSettings(false);
+    }
+  };
+
+  const handleTestConnection = async () => {
+    setTestingConn(true);
+    setConnResult(null);
+    try {
+      const res = await apiRequest('POST', `/api/projects/${projectId}/ad-test-connection`, {
+        adDcHostname: dcHostname,
+        adLdapPort: parseInt(ldapPort) || 389,
+        adBindDn: bindDn,
+        adBindPassword: bindPassword || undefined,
+        adBaseDn: baseDn,
+        adUseSsl: useSsl,
+      });
+      const data = await res.json();
+      setConnResult(data);
+    } catch (err: any) {
+      setConnResult({ success: false, message: err.message || 'Connection failed' });
+    } finally {
+      setTestingConn(false);
+    }
+  };
+
+  const handleDiscover = async () => {
+    setDiscovering(true);
+    setDiscoveryError(null);
+    setDiscoveredUsers([]);
+    setSelected(new Set());
+    setMigrationResults([]);
+    try {
+      const res = await apiRequest('GET', `/api/projects/${projectId}/entra-ad/discover`);
+      const data = await res.json();
+      const users: EntraCloudUser[] = data.users || [];
+      setDiscoveredUsers(users);
+      // Pre-fill target UPNs
+      const upns: Record<string, string> = {};
+      users.forEach(u => { upns[u.userPrincipalName] = u.userPrincipalName; });
+      setTargetUpns(upns);
+    } catch (err: any) {
+      setDiscoveryError(err.message || 'Discovery failed');
+    } finally {
+      setDiscovering(false);
+    }
+  };
+
+  const toggleAll = () => {
+    const filtered = filteredUsers.map(u => u.userPrincipalName);
+    const allSelected = filtered.every(upn => selected.has(upn));
+    const next = new Set(selected);
+    if (allSelected) filtered.forEach(upn => next.delete(upn));
+    else filtered.forEach(upn => next.add(upn));
+    setSelected(next);
+  };
+
+  const getSelectedUsers = () =>
+    discoveredUsers.filter(u => selected.has(u.userPrincipalName)).map(u => ({
+      upn: u.userPrincipalName,
+      targetUpn: targetUpns[u.userPrincipalName] || u.userPrincipalName,
+      displayName: u.displayName,
+      givenName: u.givenName || undefined,
+      surname: u.surname || undefined,
+      jobTitle: u.jobTitle || undefined,
+      department: u.department || undefined,
+      officeLocation: u.officeLocation || undefined,
+      mobilePhone: u.mobilePhone || undefined,
+      mail: u.mail || undefined,
+    }));
+
+  const handleMigrate = async () => {
+    const users = getSelectedUsers();
+    if (users.length === 0) return;
+    setMigrating(true);
+    setMigrationResults([]);
+    try {
+      const res = await apiRequest('POST', `/api/projects/${projectId}/entra-ad/migrate`, { users });
+      const data = await res.json();
+      setMigrationResults(data.results || []);
+      queryClient.invalidateQueries({ queryKey: ['/api/projects', projectId] });
+      const success = (data.results || []).filter((r: AdMigrationResult) => r.success).length;
+      const failed = (data.results || []).filter((r: AdMigrationResult) => !r.success).length;
+      toast({
+        title: `Migration Complete`,
+        description: `${success} created/skipped, ${failed} failed`,
+        variant: failed > 0 ? 'destructive' : 'default',
+      });
+    } catch (err: any) {
+      toast({ title: 'Migration Error', description: err.message, variant: 'destructive' });
+    } finally {
+      setMigrating(false);
+    }
+  };
+
+  const handleExportPs = async () => {
+    const users = getSelectedUsers();
+    if (users.length === 0) return;
+    setExporting(true);
+    try {
+      const res = await apiRequest('POST', `/api/projects/${projectId}/entra-ad/export-ps`, { users });
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `migrate-entra-to-ad-${Date.now()}.ps1`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      toast({ title: 'Downloaded', description: 'PowerShell script downloaded. Run it on a domain controller as an admin.' });
+    } catch (err: any) {
+      toast({ title: 'Export Error', description: err.message, variant: 'destructive' });
+    } finally {
+      setExporting(false);
+    }
+  };
+
+  const filteredUsers = discoveredUsers.filter(u =>
+    !filterText ||
+    u.displayName.toLowerCase().includes(filterText.toLowerCase()) ||
+    u.userPrincipalName.toLowerCase().includes(filterText.toLowerCase()) ||
+    (u.department || '').toLowerCase().includes(filterText.toLowerCase())
+  );
+
+  return (
+    <div className="space-y-6">
+      {/* Info banner */}
+      <Card className="border-violet-200 dark:border-violet-900 bg-violet-50/50 dark:bg-violet-950/20 shadow-sm">
+        <CardContent className="pt-6">
+          <div className="flex gap-3">
+            <Server className="w-5 h-5 text-violet-600 dark:text-violet-400 mt-0.5 flex-shrink-0" />
+            <div className="space-y-1 text-sm">
+              <p className="font-medium text-violet-900 dark:text-violet-200">Entra ID (Cloud-Only) → On-Premises Active Directory</p>
+              <p className="text-violet-700 dark:text-violet-300">
+                This tool discovers users that exist <em>only</em> in Entra ID (Azure AD) with no on-premises sync, and provisions them in your on-premises Active Directory via LDAP — or generates a PowerShell script to run on your domain controller.
+              </p>
+              <ul className="list-disc pl-5 space-y-0.5 text-violet-600 dark:text-violet-400">
+                <li><strong>Direct LDAP migration</strong> requires network access to the DC and LDAPS (port 636) for password setting.</li>
+                <li><strong>PowerShell export</strong> runs on any machine with RSAT and requires Domain Admin rights.</li>
+                <li>After migration, configure Azure AD Connect to sync the AD accounts back to Entra ID for a hybrid identity.</li>
+              </ul>
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* AD Connection Settings */}
+      <Card className="shadow-sm">
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2"><Server className="w-5 h-5" /> On-Premises AD Connection</CardTitle>
+          <CardDescription>Configure the LDAP connection to your on-premises Domain Controller.</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div className="space-y-2">
+              <Label>Domain Controller Hostname / IP</Label>
+              <Input
+                placeholder="dc01.corp.com or 192.168.1.10"
+                value={dcHostname}
+                onChange={e => setDcHostname(e.target.value)}
+                data-testid="input-ad-dc-hostname"
+              />
+            </div>
+            <div className="space-y-2">
+              <Label>LDAP Port</Label>
+              <Input
+                placeholder="389 (LDAP) or 636 (LDAPS)"
+                value={ldapPort}
+                onChange={e => setLdapPort(e.target.value)}
+                data-testid="input-ad-ldap-port"
+              />
+            </div>
+            <div className="space-y-2">
+              <Label>Bind DN (Admin Account)</Label>
+              <Input
+                placeholder="CN=Administrator,CN=Users,DC=corp,DC=com"
+                value={bindDn}
+                onChange={e => setBindDn(e.target.value)}
+                className="font-mono text-sm"
+                data-testid="input-ad-bind-dn"
+              />
+            </div>
+            <div className="space-y-2">
+              <Label>Bind Password</Label>
+              <div className="relative">
+                <Input
+                  type={showAdPassword ? 'text' : 'password'}
+                  placeholder={project.adBindDn ? '(saved — enter new to change)' : 'Admin password'}
+                  value={bindPassword}
+                  onChange={e => setBindPassword(e.target.value)}
+                  className="pr-10"
+                  data-testid="input-ad-bind-password"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowAdPassword(!showAdPassword)}
+                  className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+                >
+                  {showAdPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                </button>
+              </div>
+            </div>
+            <div className="space-y-2">
+              <Label>Base DN</Label>
+              <Input
+                placeholder="DC=corp,DC=com"
+                value={baseDn}
+                onChange={e => setBaseDn(e.target.value)}
+                className="font-mono text-sm"
+                data-testid="input-ad-base-dn"
+              />
+            </div>
+            <div className="space-y-2">
+              <Label>Target OU (where users will be created)</Label>
+              <Input
+                placeholder="OU=MigratedUsers,DC=corp,DC=com"
+                value={targetOu}
+                onChange={e => setTargetOu(e.target.value)}
+                className="font-mono text-sm"
+                data-testid="input-ad-target-ou"
+              />
+              <p className="text-xs text-muted-foreground">Leave empty to use Base DN</p>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <input
+              type="checkbox"
+              id="ad-use-ssl"
+              checked={useSsl}
+              onChange={e => setUseSsl(e.target.checked)}
+              data-testid="checkbox-ad-use-ssl"
+              className="rounded"
+            />
+            <label htmlFor="ad-use-ssl" className="text-sm cursor-pointer">
+              Use LDAPS (SSL, port 636) — required for password setting in production
+            </label>
+          </div>
+
+          <div className="flex flex-wrap gap-3">
+            <Button onClick={handleSaveSettings} disabled={savingSettings} data-testid="button-save-ad-settings">
+              {savingSettings ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : null}
+              Save Settings
+            </Button>
+            <Button
+              variant="outline"
+              onClick={handleTestConnection}
+              disabled={testingConn || !dcHostname || !bindDn || !baseDn}
+              data-testid="button-test-ad-connection"
+            >
+              {testingConn ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : null}
+              Test Connection
+            </Button>
+          </div>
+
+          {connResult && (
+            <div className={`flex items-start gap-2 p-3 rounded-lg text-sm border ${
+              connResult.success
+                ? 'bg-emerald-50 dark:bg-emerald-950/30 border-emerald-200 dark:border-emerald-800 text-emerald-800 dark:text-emerald-300'
+                : 'bg-red-50 dark:bg-red-950/30 border-red-200 dark:border-red-800 text-red-800 dark:text-red-300'
+            }`} data-testid="status-ad-connection-result">
+              {connResult.success ? <CheckCircle2 className="w-4 h-4 mt-0.5 flex-shrink-0" /> : <XCircle className="w-4 h-4 mt-0.5 flex-shrink-0" />}
+              <span>{connResult.message}</span>
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* Discovery */}
+      <Card className="shadow-sm">
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2"><Search className="w-5 h-5" /> Discover Cloud-Only Users</CardTitle>
+          <CardDescription>Scan the source Entra ID tenant to find users that have no on-premises Active Directory counterpart.</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <Button onClick={handleDiscover} disabled={discovering} data-testid="button-discover-cloud-users">
+            {discovering ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : <Search className="w-4 h-4 mr-2" />}
+            {discovering ? 'Scanning Entra ID...' : 'Discover Cloud-Only Users'}
+          </Button>
+          {discoveryError && (
+            <div className="flex items-start gap-2 p-3 rounded-lg bg-red-50 dark:bg-red-950/30 border border-red-200 dark:border-red-800 text-red-800 dark:text-red-300 text-sm" data-testid="status-entra-discovery-error">
+              <AlertTriangle className="w-4 h-4 mt-0.5 flex-shrink-0" />
+              <span>{discoveryError}</span>
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* User Table */}
+      {discoveredUsers.length > 0 && (
+        <Card className="shadow-sm">
+          <CardHeader>
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <CardTitle>{discoveredUsers.length} Cloud-Only Users Found</CardTitle>
+                <CardDescription className="mt-1">{selected.size} selected</CardDescription>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                <Button variant="outline" size="sm" onClick={toggleAll} data-testid="button-select-all-entra">
+                  {filteredUsers.every(u => selected.has(u.userPrincipalName)) ? 'Deselect All' : 'Select All'}
+                </Button>
+                <Button
+                  size="sm"
+                  disabled={selected.size === 0 || migrating || !hasAdSettings}
+                  onClick={handleMigrate}
+                  data-testid="button-migrate-to-ad"
+                >
+                  {migrating ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : <Server className="w-4 h-4 mr-2" />}
+                  Migrate via LDAP ({selected.size})
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={selected.size === 0 || exporting}
+                  onClick={handleExportPs}
+                  data-testid="button-export-powershell"
+                >
+                  {exporting ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : <Terminal className="w-4 h-4 mr-2" />}
+                  Export PowerShell (.ps1)
+                </Button>
+              </div>
+            </div>
+            {!hasAdSettings && (
+              <p className="text-xs text-amber-600 dark:text-amber-400 mt-2 flex items-center gap-1">
+                <AlertTriangle className="w-3 h-3" /> Save AD connection settings above to enable direct LDAP migration.
+              </p>
+            )}
+          </CardHeader>
+          <CardContent className="space-y-3">
+            <Input
+              placeholder="Filter by name, UPN, or department..."
+              value={filterText}
+              onChange={e => setFilterText(e.target.value)}
+              data-testid="input-filter-users"
+            />
+            <div className="border rounded-lg overflow-hidden">
+              <div className="grid grid-cols-[auto_2fr_2fr_1fr_1fr] gap-0 bg-muted/40 px-4 py-2 text-xs font-medium text-muted-foreground border-b">
+                <div className="w-6"></div>
+                <div>User</div>
+                <div>Target UPN in AD</div>
+                <div>Department</div>
+                <div>Status</div>
+              </div>
+              <div className="divide-y divide-border max-h-[500px] overflow-y-auto">
+                {filteredUsers.map(user => {
+                  const result = migrationResults.find(r => r.userPrincipalName === (targetUpns[user.userPrincipalName] || user.userPrincipalName));
+                  return (
+                    <div
+                      key={user.userPrincipalName}
+                      className={`grid grid-cols-[auto_2fr_2fr_1fr_1fr] gap-3 items-center px-4 py-3 hover:bg-muted/20 transition-colors ${selected.has(user.userPrincipalName) ? 'bg-primary/5' : ''}`}
+                      data-testid={`row-entra-user-${user.id}`}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={selected.has(user.userPrincipalName)}
+                        onChange={() => {
+                          const next = new Set(selected);
+                          if (next.has(user.userPrincipalName)) next.delete(user.userPrincipalName);
+                          else next.add(user.userPrincipalName);
+                          setSelected(next);
+                        }}
+                        className="rounded"
+                      />
+                      <div className="min-w-0">
+                        <div className="font-medium text-sm truncate">{user.displayName}</div>
+                        <div className="text-xs text-muted-foreground truncate">{user.userPrincipalName}</div>
+                        {user.jobTitle && <div className="text-xs text-muted-foreground truncate">{user.jobTitle}</div>}
+                      </div>
+                      <Input
+                        className="text-xs font-mono h-7 px-2"
+                        value={targetUpns[user.userPrincipalName] || user.userPrincipalName}
+                        onChange={e => setTargetUpns(prev => ({ ...prev, [user.userPrincipalName]: e.target.value }))}
+                        data-testid={`input-target-upn-${user.id}`}
+                      />
+                      <div className="text-xs text-muted-foreground truncate">{user.department || '—'}</div>
+                      <div className="text-xs">
+                        {!result ? (
+                          <span className="text-muted-foreground">{user.accountEnabled ? 'Enabled' : 'Disabled'}</span>
+                        ) : result.success ? (
+                          <span className="text-emerald-600 dark:text-emerald-400 flex items-center gap-1">
+                            <CheckCircle2 className="w-3 h-3" />
+                            {result.created ? 'Created' : 'Exists'}
+                          </span>
+                        ) : (
+                          <span className="text-red-600 dark:text-red-400 flex items-center gap-1" title={result.message}>
+                            <XCircle className="w-3 h-3" /> Failed
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Migration Results */}
+      {migrationResults.length > 0 && (
+        <Card className="shadow-sm">
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              <CheckCircle2 className="w-5 h-5 text-emerald-500" /> Migration Results
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="border rounded-lg divide-y divide-border overflow-hidden">
+              {migrationResults.map((r, i) => (
+                <div key={i} className="flex items-start gap-3 px-4 py-3" data-testid={`result-ad-migration-${i}`}>
+                  {r.success ? (
+                    <CheckCircle2 className="w-4 h-4 text-emerald-500 mt-0.5 flex-shrink-0" />
+                  ) : (
+                    <XCircle className="w-4 h-4 text-red-500 mt-0.5 flex-shrink-0" />
+                  )}
+                  <div className="flex-1 min-w-0">
+                    <div className="text-sm font-mono truncate">{r.userPrincipalName}</div>
+                    <div className="text-xs text-muted-foreground">{r.message}</div>
+                    {r.tempPassword && (
+                      <div className="text-xs mt-1 font-mono bg-muted px-2 py-1 rounded inline-block">
+                        Temp password: <span className="font-semibold">{r.tempPassword}</span>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+            <p className="text-xs text-muted-foreground mt-3">
+              Migration records have been saved to the Migration Items tab. Users must change their temporary passwords on first login.
+              Remember to assign AD licences and configure Azure AD Connect for hybrid identity sync.
+            </p>
+          </CardContent>
+        </Card>
+      )}
     </div>
   );
 }
