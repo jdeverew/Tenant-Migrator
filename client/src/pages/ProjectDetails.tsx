@@ -4,12 +4,11 @@ import { useMigrationItems, useCreateMigrationItem, useUpdateMigrationItem, useD
 import { Sidebar } from "@/components/Sidebar";
 import { StatusBadge } from "@/components/StatusBadge";
 import { Loader2, ArrowLeft, Mail, Cloud, Users, Plus, Trash2, RotateCw, Eye, EyeOff, CheckCircle2, XCircle, Shield, ExternalLink, Play, PlayCircle, FileText, Globe, KeyRound, Search, UserCheck, MapPin, Zap, AlertTriangle, Import, Boxes, Server, Download, Terminal, Wand2, Copy, Sparkles } from "lucide-react";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip } from "recharts";
 import { Progress } from "@/components/ui/progress";
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -31,6 +30,18 @@ const itemSchema = z.object({
 });
 
 type ItemFormData = z.infer<typeof itemSchema>;
+
+type ViewType = 'overview' | 'exchange' | 'sharepoint' | 'onedrive' | 'teams' | 'users' | 'powerplatform' | 'entra_ad' | 'discovery' | 'mapping' | 'tenant_config';
+
+const MIGRATION_SERVICES = [
+  { key: 'exchange',      label: 'Exchange Online',      icon: Mail,      itemTypes: ['mailbox'],        description: 'Email, calendars & mailboxes' },
+  { key: 'sharepoint',    label: 'SharePoint Online',    icon: Globe,     itemTypes: ['sharepoint'],     description: 'Sites & document libraries' },
+  { key: 'onedrive',      label: 'OneDrive',             icon: Cloud,     itemTypes: ['onedrive'],       description: 'Personal files & folders' },
+  { key: 'teams',         label: 'Microsoft Teams',      icon: Users,     itemTypes: ['teams'],          description: 'Teams, channels & chats' },
+  { key: 'users',         label: 'User Accounts',        icon: UserCheck, itemTypes: ['user'],           description: 'User identities & accounts' },
+  { key: 'powerplatform', label: 'Power Platform',       icon: Zap,       itemTypes: ['powerplatform'],  description: 'Apps, flows & environments' },
+  { key: 'entra_ad',      label: 'Entra ID → On-Prem',  icon: Server,    itemTypes: ['entra_to_ad'],    description: 'Cloud to on-premises AD' },
+] as const;
 
 function formatBytes(bytes: number | null | undefined): string {
   if (!bytes) return '0 B';
@@ -64,6 +75,7 @@ export default function ProjectDetails() {
   const { mutateAsync: updateItem } = useUpdateMigrationItem();
   const { mutateAsync: deleteItem } = useDeleteMigrationItem();
 
+  const [currentView, setCurrentView] = useState<ViewType>('overview');
   const [isAddOpen, setIsAddOpen] = useState(false);
   const [logsDialogItem, setLogsDialogItem] = useState<MigrationItem | null>(null);
   const [itemLogs, setItemLogs] = useState<string[]>([]);
@@ -209,8 +221,6 @@ export default function ProjectDetails() {
     { name: 'Pending', value: stats.pending, color: '#94a3b8' },
   ].filter(d => d.value > 0) : [];
 
-  const pendingOrFailedCount = items?.filter(i => i.status === 'pending' || i.status === 'failed').length || 0;
-
   return (
     <div className="flex h-screen bg-slate-50 dark:bg-slate-950 text-foreground font-sans">
       <Sidebar />
@@ -243,274 +253,367 @@ export default function ProjectDetails() {
             <p className="text-muted-foreground mt-2">{project.description}</p>
           </div>
 
-          <Tabs defaultValue="overview" className="space-y-6">
-            <TabsList className="bg-white dark:bg-slate-900 border border-border/50 p-1 rounded-lg flex-wrap">
-              <TabsTrigger value="overview" data-testid="tab-overview">Overview</TabsTrigger>
-              <TabsTrigger value="items" data-testid="tab-items">Migration Items</TabsTrigger>
-              <TabsTrigger value="discovery" data-testid="tab-discovery">Discovery</TabsTrigger>
-              <TabsTrigger value="mapping" data-testid="tab-mapping">Auto-Mapping Rules</TabsTrigger>
-              <TabsTrigger value="entra-to-ad" data-testid="tab-entra-to-ad">Entra → AD</TabsTrigger>
-              <TabsTrigger value="tenant-config" data-testid="tab-tenant-config">Tenant Configuration</TabsTrigger>
-            </TabsList>
+          {/* Service sidebar + content */}
+          <div className="flex gap-0 border border-border/50 rounded-xl overflow-hidden bg-card shadow-sm min-h-[calc(100vh-14rem)]">
 
-            <TabsContent value="overview" className="space-y-6">
-              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-                <Card className="shadow-sm">
-                  <CardHeader className="pb-2">
-                    <CardTitle className="text-sm font-medium text-muted-foreground">Total Items</CardTitle>
-                  </CardHeader>
-                  <CardContent>
-                    <div className="text-3xl font-bold" data-testid="stat-total">{stats?.total || 0}</div>
-                  </CardContent>
-                </Card>
-                <Card className="shadow-sm">
-                  <CardHeader className="pb-2">
-                    <CardTitle className="text-sm font-medium text-muted-foreground">Completed</CardTitle>
-                  </CardHeader>
-                  <CardContent>
-                    <div className="text-3xl font-bold text-emerald-600" data-testid="stat-completed">{stats?.completed || 0}</div>
-                  </CardContent>
-                </Card>
-                <Card className="shadow-sm">
-                  <CardHeader className="pb-2">
-                    <CardTitle className="text-sm font-medium text-muted-foreground">In Progress</CardTitle>
-                  </CardHeader>
-                  <CardContent>
-                    <div className="text-3xl font-bold text-blue-600" data-testid="stat-in-progress">{stats?.inProgress || 0}</div>
-                  </CardContent>
-                </Card>
-                <Card className="shadow-sm">
-                  <CardHeader className="pb-2">
-                    <CardTitle className="text-sm font-medium text-muted-foreground">Failed</CardTitle>
-                  </CardHeader>
-                  <CardContent>
-                    <div className="text-3xl font-bold text-red-600" data-testid="stat-failed">{stats?.failed || 0}</div>
-                  </CardContent>
-                </Card>
+            {/* Left service navigation */}
+            <div className="w-56 flex-shrink-0 border-r border-border/50 bg-muted/10 flex flex-col">
+              {/* Overview */}
+              <div className="p-3 border-b border-border/50">
+                <button
+                  onClick={() => setCurrentView('overview')}
+                  className={`w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm font-medium transition-colors ${currentView === 'overview' ? 'bg-primary text-primary-foreground' : 'hover:bg-accent text-muted-foreground hover:text-foreground'}`}
+                  data-testid="nav-overview"
+                >
+                  <Globe className="w-4 h-4 flex-shrink-0" />
+                  Overview
+                </button>
               </div>
 
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                <Card className="h-[300px]">
-                  <CardHeader>
-                    <CardTitle>Migration Progress</CardTitle>
-                  </CardHeader>
-                  <CardContent className="h-[220px]">
-                    {chartData.length > 0 ? (
-                      <ResponsiveContainer width="100%" height="100%">
-                        <PieChart>
-                          <Pie
-                            data={chartData}
-                            cx="50%"
-                            cy="50%"
-                            innerRadius={60}
-                            outerRadius={80}
-                            paddingAngle={5}
-                            dataKey="value"
-                          >
-                            {chartData.map((entry, index) => (
-                              <Cell key={`cell-${index}`} fill={entry.color} />
-                            ))}
-                          </Pie>
-                          <Tooltip />
-                        </PieChart>
-                      </ResponsiveContainer>
-                    ) : (
-                        <div className="flex h-full items-center justify-center text-muted-foreground">
-                            No data available
-                        </div>
-                    )}
-                  </CardContent>
-                </Card>
-
-                <Card>
-                    <CardHeader>
-                        <CardTitle>Tenant Details</CardTitle>
-                    </CardHeader>
-                    <CardContent className="space-y-4">
-                        <div className="flex justify-between py-2 border-b border-border/50">
-                            <span className="text-muted-foreground">Source Tenant ID</span>
-                            <span className="font-mono text-sm" data-testid="text-source-tenant">{project.sourceTenantId}</span>
-                        </div>
-                        <div className="flex justify-between py-2 border-b border-border/50">
-                            <span className="text-muted-foreground">Target Tenant ID</span>
-                            <span className="font-mono text-sm" data-testid="text-target-tenant">{project.targetTenantId}</span>
-                        </div>
-                        <div className="flex justify-between py-2">
-                            <span className="text-muted-foreground">Created At</span>
-                            <span>{project.createdAt ? format(new Date(project.createdAt), 'PPP') : '-'}</span>
-                        </div>
-                    </CardContent>
-                </Card>
-              </div>
-            </TabsContent>
-
-            <TabsContent value="items" className="space-y-6">
-              <div className="flex justify-between items-center">
-                <h2 className="text-xl font-bold">Mapped Resources</h2>
-                <div className="flex gap-2">
-                  {pendingOrFailedCount > 0 && (
-                    <Button variant="default" onClick={handleMigrateAll} data-testid="button-migrate-all">
-                      <PlayCircle className="w-4 h-4 mr-2" /> Run All ({pendingOrFailedCount})
-                    </Button>
-                  )}
-                  <Dialog open={isAddOpen} onOpenChange={setIsAddOpen}>
-                    <DialogTrigger asChild>
-                      <Button variant="outline" data-testid="button-add-item">
-                        <Plus className="w-4 h-4 mr-2" /> Add Item
-                      </Button>
-                    </DialogTrigger>
-                    <DialogContent>
-                      <DialogHeader>
-                        <DialogTitle>Add Migration Item</DialogTitle>
-                      </DialogHeader>
-                      <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-4 py-4">
-                        <div className="space-y-2">
-                          <Label>Item Type</Label>
-                          <Controller
-                            control={form.control}
-                            name="itemType"
-                            render={({ field }) => (
-                              <Select onValueChange={field.onChange} defaultValue={field.value}>
-                                <SelectTrigger data-testid="select-item-type">
-                                  <SelectValue placeholder="Select type" />
-                                </SelectTrigger>
-                                <SelectContent>
-                                  <SelectItem value="mailbox">Mailbox (Email)</SelectItem>
-                                  <SelectItem value="onedrive">OneDrive</SelectItem>
-                                  <SelectItem value="sharepoint">SharePoint</SelectItem>
-                                  <SelectItem value="teams">Teams</SelectItem>
-                                  <SelectItem value="user">User Account</SelectItem>
-                                  <SelectItem value="powerplatform">Power Platform</SelectItem>
-                                </SelectContent>
-                              </Select>
-                            )}
-                          />
-                        </div>
-                        <div className="space-y-2">
-                          <Label>Source Identity</Label>
-                          <Input {...form.register("sourceIdentity")} placeholder={form.watch("itemType") === "sharepoint" ? "contoso.sharepoint.com:/sites/TeamSite" : "user@source.com"} data-testid="input-source-identity" />
-                          {form.formState.errors.sourceIdentity && <p className="text-xs text-red-500">{form.formState.errors.sourceIdentity.message}</p>}
-                          {form.watch("itemType") === "sharepoint" && (
-                            <p className="text-xs text-muted-foreground">For SharePoint, use the site hostname and path (e.g., contoso.sharepoint.com:/sites/TeamSite) or site display name for search.</p>
+              {/* Migration services */}
+              <div className="p-3 flex-1 space-y-4">
+                <div>
+                  <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wider px-3 mb-1.5">Migration</p>
+                  <div className="space-y-0.5">
+                    {MIGRATION_SERVICES.map(({ key, label, icon: Icon, itemTypes }) => {
+                      const count = items?.filter(i => (itemTypes as readonly string[]).includes(i.itemType)).length || 0;
+                      const pending = items?.filter(i => (itemTypes as readonly string[]).includes(i.itemType) && (i.status === 'pending' || i.status === 'failed')).length || 0;
+                      const active = currentView === key;
+                      return (
+                        <button
+                          key={key}
+                          onClick={() => setCurrentView(key as ViewType)}
+                          className={`w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm transition-colors ${active ? 'bg-primary text-primary-foreground' : 'hover:bg-accent text-muted-foreground hover:text-foreground'}`}
+                          data-testid={`nav-service-${key}`}
+                        >
+                          <Icon className="w-4 h-4 flex-shrink-0" />
+                          <span className="flex-1 text-left truncate">{label}</span>
+                          {count > 0 && (
+                            <span className={`text-xs rounded-full px-1.5 py-0.5 font-medium min-w-[1.25rem] text-center ${active ? 'bg-primary-foreground/20 text-primary-foreground' : pending > 0 ? 'bg-amber-100 dark:bg-amber-900/40 text-amber-700 dark:text-amber-400' : 'bg-muted text-muted-foreground'}`}>
+                              {count}
+                            </span>
                           )}
-                        </div>
-                        <div className="space-y-2">
-                          <Label>Target Identity</Label>
-                          <Input {...form.register("targetIdentity")} placeholder={form.watch("itemType") === "sharepoint" ? "fabrikam.sharepoint.com:/sites/TeamSite" : "user@target.com"} data-testid="input-target-identity" />
-                          {form.formState.errors.targetIdentity && <p className="text-xs text-red-500">{form.formState.errors.targetIdentity.message}</p>}
-                        </div>
-                        <div className="flex justify-end pt-4">
-                          <Button type="submit" data-testid="button-submit-item">Add Item</Button>
-                        </div>
-                      </form>
-                    </DialogContent>
-                  </Dialog>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                <div>
+                  <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wider px-3 mb-1.5">Tools</p>
+                  <div className="space-y-0.5">
+                    {([
+                      { key: 'discovery', label: 'Discovery', icon: Search },
+                      { key: 'mapping', label: 'Mapping Rules', icon: MapPin },
+                      { key: 'tenant_config', label: 'Tenant Config', icon: Shield },
+                    ] as const).map(({ key, label, icon: Icon }) => (
+                      <button
+                        key={key}
+                        onClick={() => setCurrentView(key)}
+                        className={`w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm transition-colors ${currentView === key ? 'bg-primary text-primary-foreground' : 'hover:bg-accent text-muted-foreground hover:text-foreground'}`}
+                        data-testid={`nav-tool-${key}`}
+                      >
+                        <Icon className="w-4 h-4 flex-shrink-0" />
+                        {label}
+                      </button>
+                    ))}
+                  </div>
                 </div>
               </div>
 
-              <div className="bg-card rounded-xl border border-border/60 shadow-sm overflow-hidden">
-                {itemsLoading ? (
-                    <div className="p-8 flex justify-center"><Loader2 className="animate-spin" /></div>
-                ) : items && items.length > 0 ? (
-                  <table className="w-full text-sm">
-                    <thead>
-                      <tr className="bg-muted/30 border-b border-border/60">
-                        <th className="px-6 py-4 text-left font-semibold text-muted-foreground w-12">Type</th>
-                        <th className="px-6 py-4 text-left font-semibold text-muted-foreground">Source Identity</th>
-                        <th className="px-6 py-4 text-left font-semibold text-muted-foreground">Target Identity</th>
-                        <th className="px-6 py-4 text-left font-semibold text-muted-foreground">Status</th>
-                        <th className="px-6 py-4 text-right font-semibold text-muted-foreground">Actions</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-border/40">
-                      {items.map((item: MigrationItem) => (
-                        <tr key={item.id} className="hover:bg-slate-50 dark:hover:bg-slate-900/50" data-testid={`row-item-${item.id}`}>
-                          <td className="px-6 py-4">
-                            <ItemTypeIcon type={item.itemType} />
-                          </td>
-                          <td className="px-6 py-4 font-medium" data-testid={`text-source-${item.id}`}>{item.sourceIdentity}</td>
-                          <td className="px-6 py-4 text-muted-foreground" data-testid={`text-target-${item.id}`}>{item.targetIdentity || "Auto-mapped"}</td>
-                          <td className="px-6 py-4 min-w-[200px]">
-                            <div className="flex items-center gap-2">
-                              <StatusBadge status={item.status} />
-                              {item.status === 'in_progress' && <Loader2 className="w-3 h-3 animate-spin text-blue-500" />}
-                            </div>
-                            {item.status === 'in_progress' && item.bytesTotal != null && item.bytesTotal > 0 && (
-                              <div className="mt-2 space-y-1" data-testid={`progress-${item.id}`}>
-                                <Progress value={item.progressPercent ?? 0} className="h-1.5" />
-                                <div className="text-xs text-muted-foreground flex justify-between">
-                                  <span>{formatBytes(item.bytesMigrated)} / {formatBytes(item.bytesTotal)}</span>
-                                  <span className="font-medium text-blue-500">{item.progressPercent ?? 0}%</span>
-                                </div>
-                              </div>
-                            )}
-                            {(item.status === 'completed') && item.bytesMigrated != null && item.bytesMigrated > 0 && (
-                              <div className="text-xs text-muted-foreground mt-1" data-testid={`bytes-${item.id}`}>
-                                {formatBytes(item.bytesMigrated)} migrated
-                              </div>
-                            )}
-                            {item.status === 'failed' && item.errorDetails && (
-                              <div className="text-xs text-red-500 mt-1 max-w-[200px] truncate" title={item.errorDetails} data-testid={`text-error-${item.id}`}>
-                                {item.errorDetails}
-                              </div>
-                            )}
-                          </td>
-                          <td className="px-6 py-4 text-right">
-                            <div className="flex items-center justify-end gap-1">
-                              {(item.status === 'pending' || item.status === 'failed') && (
-                                <Button size="sm" variant="ghost" onClick={() => handleMigrateItem(item.id)} title="Start Migration" data-testid={`button-migrate-${item.id}`}>
-                                  <Play className="w-4 h-4 text-emerald-600" />
-                                </Button>
-                              )}
-                              {item.status === 'failed' && (
-                                <Button size="sm" variant="ghost" onClick={() => handleRetry(item.id)} title="Reset to Pending" data-testid={`button-retry-${item.id}`}>
-                                  <RotateCw className="w-4 h-4 text-blue-600" />
-                                </Button>
-                              )}
-                              {(item.logs && (item.logs as string[]).length > 0) || item.status === 'in_progress' || item.status === 'completed' || item.status === 'failed' ? (
-                                <Button size="sm" variant="ghost" onClick={() => handleViewLogs(item)} title="View Logs" data-testid={`button-logs-${item.id}`}>
-                                  <FileText className="w-4 h-4 text-slate-500" />
-                                </Button>
-                              ) : null}
-                              {item.status !== 'in_progress' && (
-                                <Button size="sm" variant="ghost" onClick={() => handleDelete(item.id)} title="Delete" data-testid={`button-delete-${item.id}`}>
-                                  <Trash2 className="w-4 h-4 text-red-500" />
-                                </Button>
-                              )}
-                            </div>
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                ) : (
-                  <div className="p-12 text-center text-muted-foreground">
-                    No items mapped yet. Click "Add Item" to start.
-                  </div>
-                )}
+              {/* Bottom: overall progress */}
+              <div className="p-3 border-t border-border/50 space-y-1.5">
+                <div className="flex justify-between text-xs text-muted-foreground">
+                  <span>{stats?.total || 0} total</span>
+                  <span className="text-emerald-600 dark:text-emerald-400 font-medium">{stats?.completed || 0} done</span>
+                </div>
+                <Progress value={stats?.total ? Math.round(((stats.completed || 0) / stats.total) * 100) : 0} className="h-1.5" />
               </div>
-            </TabsContent>
+            </div>
 
-            <TabsContent value="discovery">
-              <DiscoveryTab projectId={id} onImport={(newItems) => {
-                newItems.forEach(item => createItem(item).catch(() => {}));
-                queryClient.invalidateQueries({ queryKey: [api.items.list.path, id] });
-                toast({ title: "Imported", description: `${newItems.length} item(s) added to migration queue.` });
-              }} />
-            </TabsContent>
+            {/* Main content */}
+            <div className="flex-1 overflow-y-auto p-6 min-w-0">
 
-            <TabsContent value="mapping">
-              <MappingRulesTab projectId={id} />
-            </TabsContent>
+              {/* Overview */}
+              {currentView === 'overview' && (
+                <div className="space-y-6">
+                  <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+                    {[
+                      { label: 'Total Items', value: stats?.total || 0, color: '' },
+                      { label: 'Completed', value: stats?.completed || 0, color: 'text-emerald-600' },
+                      { label: 'In Progress', value: stats?.inProgress || 0, color: 'text-blue-600' },
+                      { label: 'Failed', value: stats?.failed || 0, color: 'text-red-600' },
+                    ].map(({ label, value, color }) => (
+                      <Card key={label} className="shadow-sm">
+                        <CardHeader className="pb-2"><CardTitle className="text-sm font-medium text-muted-foreground">{label}</CardTitle></CardHeader>
+                        <CardContent><div className={`text-3xl font-bold ${color}`}>{value}</div></CardContent>
+                      </Card>
+                    ))}
+                  </div>
 
-            <TabsContent value="entra-to-ad">
-              <EntraToAdTab projectId={id} project={project} />
-            </TabsContent>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    {/* Service breakdown */}
+                    <Card>
+                      <CardHeader><CardTitle className="text-base">By Service</CardTitle></CardHeader>
+                      <CardContent className="space-y-3">
+                        {MIGRATION_SERVICES.map(({ key, label, icon: Icon, itemTypes }) => {
+                          const svcItems = items?.filter(i => (itemTypes as readonly string[]).includes(i.itemType)) || [];
+                          const done = svcItems.filter(i => i.status === 'completed').length;
+                          const total = svcItems.length;
+                          if (total === 0) return null;
+                          return (
+                            <button key={key} onClick={() => setCurrentView(key as ViewType)} className="w-full flex items-center gap-3 hover:bg-muted/50 rounded-lg p-2 -mx-2 transition-colors text-left">
+                              <Icon className="w-4 h-4 text-muted-foreground flex-shrink-0" />
+                              <span className="flex-1 text-sm font-medium">{label}</span>
+                              <span className="text-xs text-muted-foreground">{done}/{total}</span>
+                              <div className="w-20"><Progress value={total ? Math.round((done / total) * 100) : 0} className="h-1.5" /></div>
+                            </button>
+                          );
+                        })}
+                        {(!items || items.length === 0) && <p className="text-sm text-muted-foreground">No items yet. Open a service to add items.</p>}
+                      </CardContent>
+                    </Card>
 
-            <TabsContent value="tenant-config">
-                <TenantConfigTab projectId={id} project={project} />
-            </TabsContent>
-          </Tabs>
+                    {/* Chart + tenant details */}
+                    <div className="space-y-4">
+                      <Card className="h-[200px]">
+                        <CardContent className="h-full pt-4">
+                          {chartData.length > 0 ? (
+                            <ResponsiveContainer width="100%" height="100%">
+                              <PieChart>
+                                <Pie data={chartData} cx="50%" cy="50%" innerRadius={50} outerRadius={70} paddingAngle={4} dataKey="value">
+                                  {chartData.map((entry, i) => <Cell key={i} fill={entry.color} />)}
+                                </Pie>
+                                <Tooltip />
+                              </PieChart>
+                            </ResponsiveContainer>
+                          ) : (
+                            <div className="flex h-full items-center justify-center text-muted-foreground text-sm">No data yet</div>
+                          )}
+                        </CardContent>
+                      </Card>
+                      <Card>
+                        <CardHeader><CardTitle className="text-base">Tenant Details</CardTitle></CardHeader>
+                        <CardContent className="space-y-2 text-sm">
+                          <div className="flex justify-between py-1.5 border-b border-border/50">
+                            <span className="text-muted-foreground">Source</span>
+                            <span className="font-mono text-xs" data-testid="text-source-tenant">{project.sourceTenantId}</span>
+                          </div>
+                          <div className="flex justify-between py-1.5 border-b border-border/50">
+                            <span className="text-muted-foreground">Target</span>
+                            <span className="font-mono text-xs" data-testid="text-target-tenant">{project.targetTenantId}</span>
+                          </div>
+                          <div className="flex justify-between py-1.5">
+                            <span className="text-muted-foreground">Created</span>
+                            <span>{project.createdAt ? format(new Date(project.createdAt), 'PP') : '-'}</span>
+                          </div>
+                        </CardContent>
+                      </Card>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Service dashboards */}
+              {MIGRATION_SERVICES.map(({ key, label, icon: Icon, itemTypes, description }) => {
+                if (currentView !== key) return null;
+                if (key === 'entra_ad') {
+                  return <EntraToAdTab key={key} projectId={id} project={project} />;
+                }
+                const svcItems = (items || []).filter(i => (itemTypes as readonly string[]).includes(i.itemType));
+                const pending = svcItems.filter(i => i.status === 'pending' || i.status === 'failed').length;
+                const svcItemType = itemTypes[0] as string;
+                return (
+                  <div key={key} className="space-y-5">
+                    {/* Service header */}
+                    <div className="flex items-start justify-between gap-4">
+                      <div className="flex items-center gap-3">
+                        <div className="p-2 rounded-lg bg-primary/10">
+                          <Icon className="w-5 h-5 text-primary" />
+                        </div>
+                        <div>
+                          <h2 className="text-xl font-bold">{label}</h2>
+                          <p className="text-sm text-muted-foreground">{description}</p>
+                        </div>
+                      </div>
+                      <div className="flex gap-2 flex-shrink-0">
+                        {pending > 0 && (
+                          <Button onClick={async () => {
+                            try {
+                              await Promise.all(
+                                svcItems.filter(i => i.status === 'pending' || i.status === 'failed')
+                                  .map(i => apiRequest('POST', `/api/projects/${id}/items/${i.id}/migrate`))
+                              );
+                              toast({ title: "Migration started", description: `Running ${pending} ${label} item(s).` });
+                              queryClient.invalidateQueries({ queryKey: [api.items.list.path, id] });
+                            } catch { toast({ title: "Error", description: "Failed to start migration", variant: "destructive" }); }
+                          }} data-testid={`button-migrate-all-${key}`}>
+                            <PlayCircle className="w-4 h-4 mr-2" /> Run All ({pending})
+                          </Button>
+                        )}
+                        <Button variant="outline" onClick={() => {
+                          form.setValue('itemType', svcItemType);
+                          form.setValue('sourceIdentity', '');
+                          form.setValue('targetIdentity', '');
+                          setIsAddOpen(true);
+                        }} data-testid={`button-add-${key}`}>
+                          <Plus className="w-4 h-4 mr-2" /> Add Item
+                        </Button>
+                      </div>
+                    </div>
+
+                    {/* Service stats */}
+                    <div className="grid grid-cols-4 gap-3">
+                      {[
+                        { label: 'Total', value: svcItems.length, color: '' },
+                        { label: 'Pending', value: svcItems.filter(i => i.status === 'pending').length, color: 'text-slate-600' },
+                        { label: 'Completed', value: svcItems.filter(i => i.status === 'completed').length, color: 'text-emerald-600' },
+                        { label: 'Failed', value: svcItems.filter(i => i.status === 'failed').length, color: 'text-red-600' },
+                      ].map(({ label: sl, value, color }) => (
+                        <Card key={sl} className="shadow-sm">
+                          <CardHeader className="pb-1 pt-4 px-4"><CardTitle className="text-xs font-medium text-muted-foreground">{sl}</CardTitle></CardHeader>
+                          <CardContent className="px-4 pb-4"><div className={`text-2xl font-bold ${color}`}>{value}</div></CardContent>
+                        </Card>
+                      ))}
+                    </div>
+
+                    {/* Items table */}
+                    <div className="bg-background rounded-lg border border-border/60 shadow-sm overflow-hidden">
+                      {itemsLoading ? (
+                        <div className="p-8 flex justify-center"><Loader2 className="animate-spin" /></div>
+                      ) : svcItems.length > 0 ? (
+                        <table className="w-full text-sm">
+                          <thead>
+                            <tr className="bg-muted/30 border-b border-border/60">
+                              <th className="px-5 py-3 text-left font-semibold text-muted-foreground">Source</th>
+                              <th className="px-5 py-3 text-left font-semibold text-muted-foreground">Target</th>
+                              <th className="px-5 py-3 text-left font-semibold text-muted-foreground">Status</th>
+                              <th className="px-5 py-3 text-right font-semibold text-muted-foreground">Actions</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-border/40">
+                            {svcItems.map((item: MigrationItem) => (
+                              <tr key={item.id} className="hover:bg-muted/20" data-testid={`row-item-${item.id}`}>
+                                <td className="px-5 py-3 font-medium" data-testid={`text-source-${item.id}`}>{item.sourceIdentity}</td>
+                                <td className="px-5 py-3 text-muted-foreground" data-testid={`text-target-${item.id}`}>{item.targetIdentity || 'Auto-mapped'}</td>
+                                <td className="px-5 py-3 min-w-[180px]">
+                                  <div className="flex items-center gap-2">
+                                    <StatusBadge status={item.status} />
+                                    {item.status === 'in_progress' && <Loader2 className="w-3 h-3 animate-spin text-blue-500" />}
+                                  </div>
+                                  {item.status === 'in_progress' && item.bytesTotal != null && item.bytesTotal > 0 && (
+                                    <div className="mt-1.5 space-y-0.5">
+                                      <Progress value={item.progressPercent ?? 0} className="h-1" />
+                                      <div className="text-xs text-muted-foreground flex justify-between">
+                                        <span>{formatBytes(item.bytesMigrated)} / {formatBytes(item.bytesTotal)}</span>
+                                        <span className="text-blue-500 font-medium">{item.progressPercent ?? 0}%</span>
+                                      </div>
+                                    </div>
+                                  )}
+                                  {item.status === 'completed' && item.bytesMigrated != null && item.bytesMigrated > 0 && (
+                                    <div className="text-xs text-muted-foreground mt-0.5">{formatBytes(item.bytesMigrated)} migrated</div>
+                                  )}
+                                  {item.status === 'failed' && item.errorDetails && (
+                                    <div className="text-xs text-red-500 mt-0.5 truncate max-w-[200px]" title={item.errorDetails}>{item.errorDetails}</div>
+                                  )}
+                                </td>
+                                <td className="px-5 py-3 text-right">
+                                  <div className="flex items-center justify-end gap-1">
+                                    {(item.status === 'pending' || item.status === 'failed') && (
+                                      <Button size="sm" variant="ghost" onClick={() => handleMigrateItem(item.id)} title="Start" data-testid={`button-migrate-${item.id}`}>
+                                        <Play className="w-4 h-4 text-emerald-600" />
+                                      </Button>
+                                    )}
+                                    {item.status === 'failed' && (
+                                      <Button size="sm" variant="ghost" onClick={() => handleRetry(item.id)} title="Reset" data-testid={`button-retry-${item.id}`}>
+                                        <RotateCw className="w-4 h-4 text-blue-600" />
+                                      </Button>
+                                    )}
+                                    {(item.status === 'in_progress' || item.status === 'completed' || item.status === 'failed') && (
+                                      <Button size="sm" variant="ghost" onClick={() => handleViewLogs(item)} title="Logs" data-testid={`button-logs-${item.id}`}>
+                                        <FileText className="w-4 h-4 text-slate-500" />
+                                      </Button>
+                                    )}
+                                    {item.status !== 'in_progress' && (
+                                      <Button size="sm" variant="ghost" onClick={() => handleDelete(item.id)} title="Delete" data-testid={`button-delete-${item.id}`}>
+                                        <Trash2 className="w-4 h-4 text-red-500" />
+                                      </Button>
+                                    )}
+                                  </div>
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      ) : (
+                        <div className="p-10 text-center space-y-3">
+                          <Icon className="w-10 h-10 text-muted-foreground/30 mx-auto" />
+                          <p className="text-muted-foreground text-sm">No {label} items yet.</p>
+                          <Button size="sm" variant="outline" onClick={() => {
+                            form.setValue('itemType', svcItemType);
+                            form.setValue('sourceIdentity', '');
+                            form.setValue('targetIdentity', '');
+                            setIsAddOpen(true);
+                          }}>
+                            <Plus className="w-4 h-4 mr-2" /> Add first item
+                          </Button>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+
+              {/* Tools */}
+              {currentView === 'discovery' && (
+                <DiscoveryTab projectId={id} onImport={(newItems) => {
+                  newItems.forEach(item => createItem(item).catch(() => {}));
+                  queryClient.invalidateQueries({ queryKey: [api.items.list.path, id] });
+                  toast({ title: "Imported", description: `${newItems.length} item(s) added to migration queue.` });
+                }} />
+              )}
+              {currentView === 'mapping' && <MappingRulesTab projectId={id} />}
+              {currentView === 'tenant_config' && <TenantConfigTab projectId={id} project={project} />}
+            </div>
+          </div>
+
+          {/* Add item dialog (shared, type pre-set by service) */}
+          <Dialog open={isAddOpen} onOpenChange={setIsAddOpen}>
+            <DialogContent>
+              <DialogHeader><DialogTitle>Add Migration Item</DialogTitle></DialogHeader>
+              <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-4 py-4">
+                <div className="space-y-2">
+                  <Label>Item Type</Label>
+                  <Controller control={form.control} name="itemType" render={({ field }) => (
+                    <Select onValueChange={field.onChange} value={field.value}>
+                      <SelectTrigger data-testid="select-item-type"><SelectValue placeholder="Select type" /></SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="mailbox">Mailbox (Exchange Online)</SelectItem>
+                        <SelectItem value="sharepoint">SharePoint Online</SelectItem>
+                        <SelectItem value="onedrive">OneDrive</SelectItem>
+                        <SelectItem value="teams">Microsoft Teams</SelectItem>
+                        <SelectItem value="user">User Account</SelectItem>
+                        <SelectItem value="powerplatform">Power Platform</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  )} />
+                </div>
+                <div className="space-y-2">
+                  <Label>Source Identity</Label>
+                  <Input {...form.register("sourceIdentity")} placeholder={form.watch("itemType") === "sharepoint" ? "contoso.sharepoint.com:/sites/Team" : "user@source.com"} data-testid="input-source-identity" />
+                  {form.formState.errors.sourceIdentity && <p className="text-xs text-red-500">{form.formState.errors.sourceIdentity.message}</p>}
+                </div>
+                <div className="space-y-2">
+                  <Label>Target Identity</Label>
+                  <Input {...form.register("targetIdentity")} placeholder={form.watch("itemType") === "sharepoint" ? "fabrikam.sharepoint.com:/sites/Team" : "user@target.com"} data-testid="input-target-identity" />
+                  {form.formState.errors.targetIdentity && <p className="text-xs text-red-500">{form.formState.errors.targetIdentity.message}</p>}
+                </div>
+                <div className="flex justify-end pt-2">
+                  <Button type="submit" data-testid="button-submit-item">Add Item</Button>
+                </div>
+              </form>
+            </DialogContent>
+          </Dialog>
         </div>
       </main>
 
