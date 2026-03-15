@@ -298,6 +298,34 @@ async function migrateDriveItemsRecursive(
   }
 }
 
+async function resolveUserDrive(client: GraphClient, userId: string, displayName: string): Promise<any> {
+  // Try the primary /drive endpoint first
+  try {
+    const drive = await client.get(`/users/${userId}/drive`);
+    if (drive && drive.id) return drive;
+  } catch (e: any) {
+    if (!e.message.includes('404')) throw e;
+  }
+
+  // Fallback: list all drives and pick the business OneDrive
+  try {
+    const drivesRes = await client.get(`/users/${userId}/drives`);
+    const drives: any[] = drivesRes.value || [];
+    const biz = drives.find((d: any) => d.driveType === 'business') || drives[0];
+    if (biz) return biz;
+  } catch (e: any) {
+    // ignore, will throw below
+  }
+
+  throw new Error(
+    `OneDrive not found for "${displayName}" (ID: ${userId}). ` +
+    `Please verify:\n` +
+    `1. The user has a Microsoft 365 license with OneDrive for Business\n` +
+    `2. The user has signed into OneDrive at least once (or an admin has provisioned it)\n` +
+    `3. The app registration has BOTH "Files.ReadWrite.All" AND "Sites.ReadWrite.All" as Application permissions with admin consent granted`
+  );
+}
+
 async function migrateOneDrive(
   source: GraphClient,
   target: GraphClient,
@@ -328,12 +356,8 @@ async function migrateOneDrive(
     logs.push(logEntry(`Source user ID: ${sourceUserId}, Target user ID: ${targetUserId}`));
     logs.push(logEntry("Reading source user's OneDrive..."));
 
-    const sourceDrive = await source.get(`/users/${sourceUserId}/drive`).catch((err: any) => {
-      throw new Error(`Cannot access source OneDrive for "${sourceUser}". Ensure the user has a OneDrive license and the app has Files.ReadWrite.All permission. Details: ${err.message}`);
-    });
-    const targetDrive = await target.get(`/users/${targetUserId}/drive`).catch((err: any) => {
-      throw new Error(`Cannot access target OneDrive for "${targetUser}". Ensure the user has a OneDrive license and the app has Files.ReadWrite.All permission. Details: ${err.message}`);
-    });
+    const sourceDrive = await resolveUserDrive(source, sourceUserId, sourceUser);
+    const targetDrive = await resolveUserDrive(target, targetUserId, targetUser);
 
     logs.push(logEntry(`Source drive: ${sourceDrive.id}, Target drive: ${targetDrive.id}`));
     await updateItemProgress(itemId, 'in_progress', logs);
