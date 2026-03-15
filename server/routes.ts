@@ -9,6 +9,7 @@ import { migrateItem, migrateAllPending } from "./services/migration-engine";
 import { GraphClient } from "./services/graph-client";
 import { discoverUsers, discoverSharePointSites, discoverTeams, discoverPowerPlatform } from "./services/discovery-service";
 import { discoverCloudOnlyUsers, testAdConnection, migrateUserToAd, generatePowerShellScript, type AdConnectionConfig } from "./services/entra-ad-service";
+import { startDeviceCodeFlow, pollAndCreateApp } from "./services/app-registration-service";
 
 function maskSecret(value: string | null): string | null {
   if (!value) return null;
@@ -504,6 +505,49 @@ export async function registerRoutes(
       res.setHeader('Content-Type', 'text/plain');
       res.setHeader('Content-Disposition', `attachment; filename="migrate-entra-to-ad-${Date.now()}.ps1"`);
       res.send(script);
+    } catch (err: any) {
+      res.status(500).json({ message: err.message });
+    }
+  });
+
+  // ── Auto App Registration (device code flow) ──────────────────────────────
+
+  app.post('/api/create-app/start', requireAuth, async (req, res) => {
+    try {
+      const { tenantId } = req.body as { tenantId: string };
+      if (!tenantId?.trim()) return res.status(400).json({ message: 'tenantId is required' });
+      const result = await startDeviceCodeFlow(tenantId.trim());
+      res.json(result);
+    } catch (err: any) {
+      res.status(500).json({ message: err.message });
+    }
+  });
+
+  app.post('/api/create-app/poll', requireAuth, async (req, res) => {
+    try {
+      const { requestId, appName } = req.body as { requestId: string; appName: string };
+      if (!requestId) return res.status(400).json({ message: 'requestId is required' });
+      const result = await pollAndCreateApp(requestId, appName || 'Tenant Migration Tool');
+      res.json(result);
+    } catch (err: any) {
+      res.status(500).json({ message: err.message });
+    }
+  });
+
+  // After auto-create completes, save credentials to a project
+  app.post('/api/projects/:id/save-app-credentials', requireAuth, async (req, res) => {
+    try {
+      const projectId = parseInt(req.params['id'] as string);
+      const { tenantType, clientId, clientSecret } = req.body as {
+        tenantType: 'source' | 'target';
+        clientId: string;
+        clientSecret: string;
+      };
+      const updates = tenantType === 'source'
+        ? { sourceClientId: clientId, sourceClientSecret: clientSecret }
+        : { targetClientId: clientId, targetClientSecret: clientSecret };
+      const project = await storage.updateProject(projectId, updates);
+      res.json(sanitizeProject(project));
     } catch (err: any) {
       res.status(500).json({ message: err.message });
     }

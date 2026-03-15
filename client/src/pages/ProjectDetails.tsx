@@ -3,7 +3,7 @@ import { useProject, useProjectStats, useUpdateProject } from "@/hooks/use-proje
 import { useMigrationItems, useCreateMigrationItem, useUpdateMigrationItem, useDeleteMigrationItem } from "@/hooks/use-items";
 import { Sidebar } from "@/components/Sidebar";
 import { StatusBadge } from "@/components/StatusBadge";
-import { Loader2, ArrowLeft, Mail, Cloud, Users, Plus, Trash2, RotateCw, Eye, EyeOff, CheckCircle2, XCircle, Shield, ExternalLink, Play, PlayCircle, FileText, Globe, KeyRound, Search, UserCheck, MapPin, Zap, AlertTriangle, Import, Boxes, Server, Download, Terminal } from "lucide-react";
+import { Loader2, ArrowLeft, Mail, Cloud, Users, Plus, Trash2, RotateCw, Eye, EyeOff, CheckCircle2, XCircle, Shield, ExternalLink, Play, PlayCircle, FileText, Globe, KeyRound, Search, UserCheck, MapPin, Zap, AlertTriangle, Import, Boxes, Server, Download, Terminal, Wand2, Copy, Sparkles } from "lucide-react";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -521,6 +521,27 @@ export default function ProjectDetails() {
   );
 }
 
+type AutoCreateStep = 'idle' | 'starting' | 'waiting' | 'creating' | 'done' | 'error';
+
+interface AutoCreateState {
+  step: AutoCreateStep;
+  requestId?: string;
+  userCode?: string;
+  verificationUri?: string;
+  expiresIn?: number;
+  appName: string;
+  result?: {
+    clientId: string;
+    clientSecret: string;
+    tenantId: string;
+    displayName: string;
+    consentUrl: string;
+    consentGranted: boolean;
+    permissions: string[];
+  };
+  error?: string;
+}
+
 function TenantCredentialForm({
   label,
   tenantType,
@@ -537,6 +558,7 @@ function TenantCredentialForm({
   clientSecret: string | null;
 }) {
   const { toast } = useToast();
+  const queryClient = useQueryClient();
   const { mutateAsync: updateProject, isPending: isSaving } = useUpdateProject();
   const [showSecret, setShowSecret] = useState(false);
   const [localClientId, setLocalClientId] = useState(clientId || '');
@@ -545,12 +567,81 @@ function TenantCredentialForm({
   const [testResult, setTestResult] = useState<{ success: boolean; message: string } | null>(null);
   const [isTesting, setIsTesting] = useState(false);
 
+  // Auto-create dialog state
+  const [autoOpen, setAutoOpen] = useState(false);
+  const [auto, setAuto] = useState<AutoCreateState>({ step: 'idle', appName: `Tenant Migration Tool - ${label}` });
+
+  // Polling effect
+  useEffect(() => {
+    if (auto.step !== 'waiting' || !auto.requestId) return;
+    const interval = setInterval(async () => {
+      try {
+        const res = await apiRequest('POST', '/api/create-app/poll', {
+          requestId: auto.requestId,
+          appName: auto.appName,
+        });
+        const data = await res.json() as any;
+
+        if (data.status === 'pending') return; // still waiting
+
+        clearInterval(interval);
+
+        if (data.status === 'completed') {
+          setAuto(prev => ({ ...prev, step: 'creating' }));
+          // Save credentials automatically
+          await apiRequest('POST', `/api/projects/${projectId}/save-app-credentials`, {
+            tenantType,
+            clientId: data.clientId,
+            clientSecret: data.clientSecret,
+          });
+          queryClient.invalidateQueries({ queryKey: ['/api/projects'] });
+          setLocalClientId(data.clientId);
+          setAuto(prev => ({ ...prev, step: 'done', result: data }));
+        } else if (data.status === 'expired') {
+          setAuto(prev => ({ ...prev, step: 'error', error: 'Sign-in timed out. Please try again.' }));
+        } else if (data.status === 'declined') {
+          setAuto(prev => ({ ...prev, step: 'error', error: 'Sign-in was cancelled or declined.' }));
+        } else if (data.status === 'failed') {
+          setAuto(prev => ({ ...prev, step: 'error', error: data.error || 'App creation failed.' }));
+        }
+      } catch (err: any) {
+        clearInterval(interval);
+        setAuto(prev => ({ ...prev, step: 'error', error: err.message || 'Polling failed.' }));
+      }
+    }, 4000);
+    return () => clearInterval(interval);
+  }, [auto.step, auto.requestId]);
+
+  const startAutoCreate = async () => {
+    if (!tenantId?.trim()) {
+      toast({ title: "Missing Tenant ID", description: "Please set a Tenant ID on the project first.", variant: "destructive" });
+      return;
+    }
+    setAuto(prev => ({ ...prev, step: 'starting', error: undefined }));
+    try {
+      const res = await apiRequest('POST', '/api/create-app/start', { tenantId });
+      const data = await res.json() as any;
+      if (data.message && !data.requestId) throw new Error(data.message);
+      setAuto(prev => ({
+        ...prev,
+        step: 'waiting',
+        requestId: data.requestId,
+        userCode: data.userCode,
+        verificationUri: data.verificationUri,
+        expiresIn: data.expiresIn,
+      }));
+    } catch (err: any) {
+      setAuto(prev => ({ ...prev, step: 'error', error: err.message || 'Failed to start sign-in.' }));
+    }
+  };
+
+  const resetAuto = () => setAuto(prev => ({ ...prev, step: 'idle', error: undefined, result: undefined, requestId: undefined }));
+
   const handleSave = async () => {
     const secretUpdate = localClientSecret ? (tenantType === 'source' ? { sourceClientSecret: localClientSecret } : { targetClientSecret: localClientSecret }) : {};
     const updates = tenantType === 'source'
       ? { sourceClientId: localClientId, ...secretUpdate }
       : { targetClientId: localClientId, ...secretUpdate };
-
     try {
       await updateProject({ id: projectId, ...updates });
       toast({ title: "Saved", description: `${label} credentials updated.` });
@@ -580,9 +671,166 @@ function TenantCredentialForm({
   return (
     <Card className="shadow-sm">
       <CardHeader>
-        <div className="flex items-center gap-2">
-          <Shield className="w-5 h-5 text-primary" />
-          <CardTitle className="text-lg">{label}</CardTitle>
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <Shield className="w-5 h-5 text-primary" />
+            <CardTitle className="text-lg">{label}</CardTitle>
+          </div>
+          <Dialog open={autoOpen} onOpenChange={(o) => { setAutoOpen(o); if (!o) resetAuto(); }}>
+            <DialogTrigger asChild>
+              <Button variant="outline" size="sm" className="gap-2" data-testid={`button-auto-create-${tenantType}`}>
+                <Wand2 className="w-4 h-4" />
+                Auto-Create App
+              </Button>
+            </DialogTrigger>
+            <DialogContent className="max-w-lg">
+              <DialogHeader>
+                <DialogTitle className="flex items-center gap-2">
+                  <Sparkles className="w-5 h-5 text-primary" />
+                  Auto-Create App Registration
+                </DialogTitle>
+              </DialogHeader>
+
+              {/* Step: idle / starting */}
+              {(auto.step === 'idle' || auto.step === 'starting') && (
+                <div className="space-y-5 py-2">
+                  <p className="text-sm text-muted-foreground">
+                    This will sign you in to your Microsoft tenant as a Global Admin and automatically create a new Entra ID App Registration with all the required permissions for migration.
+                  </p>
+                  <div className="space-y-2">
+                    <Label className="text-sm font-medium">App Display Name</Label>
+                    <Input
+                      value={auto.appName}
+                      onChange={e => setAuto(prev => ({ ...prev, appName: e.target.value }))}
+                      placeholder="Tenant Migration Tool"
+                      data-testid={`input-auto-app-name-${tenantType}`}
+                    />
+                  </div>
+                  <div className="rounded-lg border bg-muted/30 p-3 text-xs text-muted-foreground space-y-1">
+                    <p className="font-medium text-foreground">Tenant ID that will be used:</p>
+                    <p className="font-mono">{tenantId || '(not set — please set Tenant ID on this project first)'}</p>
+                  </div>
+                  <div className="rounded-lg border bg-blue-50 dark:bg-blue-950/30 p-3 text-xs text-blue-800 dark:text-blue-300 space-y-1">
+                    <p className="font-semibold">What will happen:</p>
+                    <ul className="list-disc list-inside space-y-0.5">
+                      <li>A browser sign-in code will be shown</li>
+                      <li>You sign in to Microsoft as a Global Admin</li>
+                      <li>The app registration is created automatically</li>
+                      <li>Credentials are saved to this project</li>
+                      <li>Admin consent is granted automatically if possible</li>
+                    </ul>
+                  </div>
+                  <Button
+                    onClick={startAutoCreate}
+                    disabled={auto.step === 'starting' || !tenantId}
+                    className="w-full"
+                    data-testid={`button-start-auto-create-${tenantType}`}
+                  >
+                    {auto.step === 'starting'
+                      ? <><Loader2 className="w-4 h-4 animate-spin mr-2" />Starting sign-in…</>
+                      : <><Wand2 className="w-4 h-4 mr-2" />Start Auto-Create</>}
+                  </Button>
+                </div>
+              )}
+
+              {/* Step: waiting for user to sign in */}
+              {auto.step === 'waiting' && (
+                <div className="space-y-5 py-2">
+                  <div className="rounded-lg border-2 border-primary/30 bg-primary/5 p-5 text-center space-y-3">
+                    <p className="text-sm font-medium text-muted-foreground">Step 1 — Open this URL in your browser:</p>
+                    <a
+                      href={auto.verificationUri}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="text-primary font-semibold underline underline-offset-2 text-sm"
+                    >
+                      {auto.verificationUri}
+                    </a>
+                    <p className="text-sm font-medium text-muted-foreground">Step 2 — Enter this code:</p>
+                    <div className="flex items-center justify-center gap-3">
+                      <span className="font-mono text-3xl font-bold tracking-widest text-foreground" data-testid={`text-user-code-${tenantType}`}>
+                        {auto.userCode}
+                      </span>
+                      <button
+                        onClick={() => { navigator.clipboard.writeText(auto.userCode || ''); toast({ title: "Copied!" }); }}
+                        className="text-muted-foreground hover:text-foreground transition-colors"
+                        data-testid={`button-copy-code-${tenantType}`}
+                      >
+                        <Copy className="w-5 h-5" />
+                      </button>
+                    </div>
+                    <p className="text-xs text-muted-foreground">Sign in as a Global Admin — the app will be created automatically once you do.</p>
+                  </div>
+                  <div className="flex items-center gap-2 text-sm text-muted-foreground justify-center">
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                    Waiting for sign-in…
+                  </div>
+                  <Button variant="outline" size="sm" onClick={resetAuto} className="w-full">
+                    Cancel
+                  </Button>
+                </div>
+              )}
+
+              {/* Step: creating app */}
+              {auto.step === 'creating' && (
+                <div className="flex flex-col items-center justify-center gap-4 py-8">
+                  <Loader2 className="w-8 h-8 animate-spin text-primary" />
+                  <p className="text-sm font-medium">Creating app registration and saving credentials…</p>
+                </div>
+              )}
+
+              {/* Step: done */}
+              {auto.step === 'done' && auto.result && (
+                <div className="space-y-4 py-2">
+                  <div className="flex items-center gap-2 text-emerald-700 dark:text-emerald-400">
+                    <CheckCircle2 className="w-5 h-5" />
+                    <span className="font-semibold">App registration created successfully!</span>
+                  </div>
+                  <div className="rounded-lg border bg-muted/30 p-4 space-y-2 text-sm font-mono">
+                    <div><span className="text-muted-foreground">App Name: </span>{auto.result.displayName}</div>
+                    <div><span className="text-muted-foreground">Client ID: </span>{auto.result.clientId}</div>
+                    <div><span className="text-muted-foreground">Tenant ID: </span>{auto.result.tenantId}</div>
+                    <div><span className="text-muted-foreground">Secret: </span>{'•'.repeat(16)} <span className="text-xs text-muted-foreground">(saved securely)</span></div>
+                  </div>
+                  {auto.result.consentGranted ? (
+                    <div className="flex items-center gap-2 text-sm text-emerald-700 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-950/30 border border-emerald-200 dark:border-emerald-800 rounded-lg p-3">
+                      <CheckCircle2 className="w-4 h-4 flex-shrink-0" />
+                      Admin consent was granted automatically for all required permissions.
+                    </div>
+                  ) : (
+                    <div className="space-y-2">
+                      <p className="text-sm text-amber-700 dark:text-amber-400 bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 rounded-lg p-3">
+                        Automatic consent grant was not completed — click below to grant permissions manually (takes ~10 seconds).
+                      </p>
+                      <Button
+                        variant="outline"
+                        className="w-full gap-2"
+                        onClick={() => window.open(auto.result!.consentUrl, '_blank')}
+                        data-testid={`button-grant-consent-auto-${tenantType}`}
+                      >
+                        <KeyRound className="w-4 h-4" />
+                        Grant Admin Consent Now
+                      </Button>
+                    </div>
+                  )}
+                  <Button onClick={() => setAutoOpen(false)} className="w-full" data-testid={`button-close-auto-done-${tenantType}`}>
+                    Done — Credentials Saved
+                  </Button>
+                </div>
+              )}
+
+              {/* Step: error */}
+              {auto.step === 'error' && (
+                <div className="space-y-4 py-2">
+                  <div className="flex items-start gap-2 text-red-700 dark:text-red-400 bg-red-50 dark:bg-red-950/30 border border-red-200 dark:border-red-800 rounded-lg p-3 text-sm">
+                    <XCircle className="w-4 h-4 mt-0.5 flex-shrink-0" />
+                    <span>{auto.error}</span>
+                  </div>
+                  <Button variant="outline" onClick={resetAuto} className="w-full">Try Again</Button>
+                </div>
+              )}
+            </DialogContent>
+          </Dialog>
         </div>
         <CardDescription>
           Microsoft Entra ID App Registration credentials for the {tenantType} tenant.
