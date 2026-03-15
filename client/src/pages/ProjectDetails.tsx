@@ -70,6 +70,32 @@ export default function ProjectDetails() {
   const [logsLoading, setLogsLoading] = useState(false);
   const { toast } = useToast();
 
+  // Show toast after OAuth redirect back from Microsoft
+  useEffect(() => {
+    const url = new URL(window.location.href);
+    const oauthSuccess = url.searchParams.get('oauth_success');
+    const oauthError = url.searchParams.get('oauth_error');
+    const appName = url.searchParams.get('app');
+    if (oauthSuccess) {
+      toast({
+        title: "Tenant connected successfully!",
+        description: `${appName ? `"${appName}" app was created and credentials saved` : 'App registration created and credentials saved'} for the ${oauthSuccess} tenant.`,
+      });
+      url.searchParams.delete('oauth_success');
+      url.searchParams.delete('app');
+      window.history.replaceState({}, '', url.toString());
+      queryClient.invalidateQueries({ queryKey: [api.projects.get.path, id] });
+    } else if (oauthError) {
+      toast({
+        title: "Connection failed",
+        description: decodeURIComponent(oauthError),
+        variant: "destructive",
+      });
+      url.searchParams.delete('oauth_error');
+      window.history.replaceState({}, '', url.toString());
+    }
+  }, []);
+
   const hasInProgress = items?.some(i => i.status === 'in_progress');
   useEffect(() => {
     if (!hasInProgress) return;
@@ -521,26 +547,14 @@ export default function ProjectDetails() {
   );
 }
 
-type AutoCreateStep = 'idle' | 'starting' | 'waiting' | 'creating' | 'done' | 'error';
+const SERVICE_ICONS: Record<string, any> = { Mail, Cloud, Users, UserCheck };
 
-interface AutoCreateState {
-  step: AutoCreateStep;
-  requestId?: string;
-  userCode?: string;
-  verificationUri?: string;
-  expiresIn?: number;
-  appName: string;
-  result?: {
-    clientId: string;
-    clientSecret: string;
-    tenantId: string;
-    displayName: string;
-    consentUrl: string;
-    consentGranted: boolean;
-    permissions: string[];
-  };
-  error?: string;
-}
+const SERVICES = [
+  { key: 'exchange', label: 'Exchange Online', description: 'Mailbox & email migration', icon: 'Mail' },
+  { key: 'sharepoint', label: 'SharePoint & OneDrive', description: 'Sites & files migration', icon: 'Cloud' },
+  { key: 'teams', label: 'Microsoft Teams', description: 'Teams & channels migration', icon: 'Users' },
+  { key: 'users', label: 'Users & Directory', description: 'User accounts & directory', icon: 'UserCheck' },
+] as const;
 
 function TenantCredentialForm({
   label,
@@ -558,7 +572,6 @@ function TenantCredentialForm({
   clientSecret: string | null;
 }) {
   const { toast } = useToast();
-  const queryClient = useQueryClient();
   const { mutateAsync: updateProject, isPending: isSaving } = useUpdateProject();
   const [showSecret, setShowSecret] = useState(false);
   const [localClientId, setLocalClientId] = useState(clientId || '');
@@ -566,76 +579,55 @@ function TenantCredentialForm({
   const hasExistingSecret = !!clientSecret;
   const [testResult, setTestResult] = useState<{ success: boolean; message: string } | null>(null);
   const [isTesting, setIsTesting] = useState(false);
+  const [grantedServices, setGrantedServices] = useState<Set<string>>(new Set());
+  const isConnected = !!(clientId && clientSecret);
 
-  // Auto-create dialog state
-  const [autoOpen, setAutoOpen] = useState(false);
-  const [auto, setAuto] = useState<AutoCreateState>({ step: 'idle', appName: `Tenant Migration Tool - ${label}` });
-
-  // Polling effect
+  // Listen for consent popup messages
   useEffect(() => {
-    if (auto.step !== 'waiting' || !auto.requestId) return;
-    const interval = setInterval(async () => {
-      try {
-        const res = await apiRequest('POST', '/api/create-app/poll', {
-          requestId: auto.requestId,
-          appName: auto.appName,
-        });
-        const data = await res.json() as any;
-
-        if (data.status === 'pending') return; // still waiting
-
-        clearInterval(interval);
-
-        if (data.status === 'completed') {
-          setAuto(prev => ({ ...prev, step: 'creating' }));
-          // Save credentials automatically
-          await apiRequest('POST', `/api/projects/${projectId}/save-app-credentials`, {
-            tenantType,
-            clientId: data.clientId,
-            clientSecret: data.clientSecret,
-          });
-          queryClient.invalidateQueries({ queryKey: ['/api/projects'] });
-          setLocalClientId(data.clientId);
-          setAuto(prev => ({ ...prev, step: 'done', result: data }));
-        } else if (data.status === 'expired') {
-          setAuto(prev => ({ ...prev, step: 'error', error: 'Sign-in timed out. Please try again.' }));
-        } else if (data.status === 'declined') {
-          setAuto(prev => ({ ...prev, step: 'error', error: 'Sign-in was cancelled or declined.' }));
-        } else if (data.status === 'failed') {
-          setAuto(prev => ({ ...prev, step: 'error', error: data.error || 'App creation failed.' }));
-        }
-      } catch (err: any) {
-        clearInterval(interval);
-        setAuto(prev => ({ ...prev, step: 'error', error: err.message || 'Polling failed.' }));
+    const handler = (e: MessageEvent) => {
+      if (e.origin !== window.location.origin) return;
+      if (e.data?.type === 'consent_success') {
+        toast({ title: "Permissions granted", description: "Admin consent was accepted successfully." });
+      } else if (e.data?.type === 'consent_error') {
+        toast({ title: "Consent error", description: e.data.error || 'Consent was not completed.', variant: "destructive" });
       }
-    }, 4000);
-    return () => clearInterval(interval);
-  }, [auto.step, auto.requestId]);
+    };
+    window.addEventListener('message', handler);
+    return () => window.removeEventListener('message', handler);
+  }, []);
 
-  const startAutoCreate = async () => {
+  const handleConnect = () => {
     if (!tenantId?.trim()) {
-      toast({ title: "Missing Tenant ID", description: "Please set a Tenant ID on the project first.", variant: "destructive" });
+      toast({ title: "Tenant ID required", description: "Set a Tenant ID on this project before connecting.", variant: "destructive" });
       return;
     }
-    setAuto(prev => ({ ...prev, step: 'starting', error: undefined }));
-    try {
-      const res = await apiRequest('POST', '/api/create-app/start', { tenantId });
-      const data = await res.json() as any;
-      if (data.message && !data.requestId) throw new Error(data.message);
-      setAuto(prev => ({
-        ...prev,
-        step: 'waiting',
-        requestId: data.requestId,
-        userCode: data.userCode,
-        verificationUri: data.verificationUri,
-        expiresIn: data.expiresIn,
-      }));
-    } catch (err: any) {
-      setAuto(prev => ({ ...prev, step: 'error', error: err.message || 'Failed to start sign-in.' }));
-    }
+    const params = new URLSearchParams({
+      projectId: String(projectId),
+      tenantType,
+      tenantId,
+      appName: `Tenant Migration Tool - ${label}`,
+    });
+    window.location.href = `/api/oauth/connect?${params}`;
   };
 
-  const resetAuto = () => setAuto(prev => ({ ...prev, step: 'idle', error: undefined, result: undefined, requestId: undefined }));
+  const handleGrantService = async (serviceKey: string) => {
+    if (!tenantId || !localClientId) return;
+    try {
+      const res = await fetch(`/api/oauth/consent-url?tenantId=${encodeURIComponent(tenantId)}&clientId=${encodeURIComponent(localClientId)}&service=${serviceKey}`);
+      const data = await res.json() as any;
+      if (data.url) {
+        const popup = window.open(data.url, `consent_${serviceKey}`, 'width=600,height=700,scrollbars=yes');
+        if (!popup) {
+          window.open(data.url, '_blank');
+        } else {
+          // Mark as granted optimistically after a delay
+          setTimeout(() => setGrantedServices(prev => new Set([...prev, serviceKey])), 5000);
+        }
+      }
+    } catch {
+      toast({ title: "Error", description: "Could not build consent URL.", variant: "destructive" });
+    }
+  };
 
   const handleSave = async () => {
     const secretUpdate = localClientSecret ? (tenantType === 'source' ? { sourceClientSecret: localClientSecret } : { targetClientSecret: localClientSecret }) : {};
@@ -671,246 +663,131 @@ function TenantCredentialForm({
   return (
     <Card className="shadow-sm">
       <CardHeader>
-        <div className="flex items-center justify-between">
+        <div className="flex items-center justify-between flex-wrap gap-2">
           <div className="flex items-center gap-2">
             <Shield className="w-5 h-5 text-primary" />
             <CardTitle className="text-lg">{label}</CardTitle>
+            {isConnected && (
+              <span className="inline-flex items-center gap-1 text-xs font-medium px-2 py-0.5 rounded-full bg-emerald-100 dark:bg-emerald-950/50 text-emerald-700 dark:text-emerald-400 border border-emerald-200 dark:border-emerald-800">
+                <CheckCircle2 className="w-3 h-3" /> Connected
+              </span>
+            )}
           </div>
-          <Dialog open={autoOpen} onOpenChange={(o) => { setAutoOpen(o); if (!o) resetAuto(); }}>
-            <DialogTrigger asChild>
-              <Button variant="outline" size="sm" className="gap-2" data-testid={`button-auto-create-${tenantType}`}>
-                <Wand2 className="w-4 h-4" />
-                Auto-Create App
-              </Button>
-            </DialogTrigger>
-            <DialogContent className="max-w-lg">
-              <DialogHeader>
-                <DialogTitle className="flex items-center gap-2">
-                  <Sparkles className="w-5 h-5 text-primary" />
-                  Auto-Create App Registration
-                </DialogTitle>
-              </DialogHeader>
-
-              {/* Step: idle / starting */}
-              {(auto.step === 'idle' || auto.step === 'starting') && (
-                <div className="space-y-5 py-2">
-                  <p className="text-sm text-muted-foreground">
-                    This will sign you in to your Microsoft tenant as a Global Admin and automatically create a new Entra ID App Registration with all the required permissions for migration.
-                  </p>
-                  <div className="space-y-2">
-                    <Label className="text-sm font-medium">App Display Name</Label>
-                    <Input
-                      value={auto.appName}
-                      onChange={e => setAuto(prev => ({ ...prev, appName: e.target.value }))}
-                      placeholder="Tenant Migration Tool"
-                      data-testid={`input-auto-app-name-${tenantType}`}
-                    />
-                  </div>
-                  <div className="rounded-lg border bg-muted/30 p-3 text-xs text-muted-foreground space-y-1">
-                    <p className="font-medium text-foreground">Tenant ID that will be used:</p>
-                    <p className="font-mono">{tenantId || '(not set — please set Tenant ID on this project first)'}</p>
-                  </div>
-                  <div className="rounded-lg border bg-blue-50 dark:bg-blue-950/30 p-3 text-xs text-blue-800 dark:text-blue-300 space-y-1">
-                    <p className="font-semibold">What will happen:</p>
-                    <ul className="list-disc list-inside space-y-0.5">
-                      <li>A browser sign-in code will be shown</li>
-                      <li>You sign in to Microsoft as a Global Admin</li>
-                      <li>The app registration is created automatically</li>
-                      <li>Credentials are saved to this project</li>
-                      <li>Admin consent is granted automatically if possible</li>
-                    </ul>
-                  </div>
-                  <Button
-                    onClick={startAutoCreate}
-                    disabled={auto.step === 'starting' || !tenantId}
-                    className="w-full"
-                    data-testid={`button-start-auto-create-${tenantType}`}
-                  >
-                    {auto.step === 'starting'
-                      ? <><Loader2 className="w-4 h-4 animate-spin mr-2" />Starting sign-in…</>
-                      : <><Wand2 className="w-4 h-4 mr-2" />Start Auto-Create</>}
-                  </Button>
-                </div>
-              )}
-
-              {/* Step: waiting for user to sign in */}
-              {auto.step === 'waiting' && (
-                <div className="space-y-5 py-2">
-                  <div className="rounded-lg border-2 border-primary/30 bg-primary/5 p-5 text-center space-y-3">
-                    <p className="text-sm font-medium text-muted-foreground">Step 1 — Open this URL in your browser:</p>
-                    <a
-                      href={auto.verificationUri}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="text-primary font-semibold underline underline-offset-2 text-sm"
-                    >
-                      {auto.verificationUri}
-                    </a>
-                    <p className="text-sm font-medium text-muted-foreground">Step 2 — Enter this code:</p>
-                    <div className="flex items-center justify-center gap-3">
-                      <span className="font-mono text-3xl font-bold tracking-widest text-foreground" data-testid={`text-user-code-${tenantType}`}>
-                        {auto.userCode}
-                      </span>
-                      <button
-                        onClick={() => { navigator.clipboard.writeText(auto.userCode || ''); toast({ title: "Copied!" }); }}
-                        className="text-muted-foreground hover:text-foreground transition-colors"
-                        data-testid={`button-copy-code-${tenantType}`}
-                      >
-                        <Copy className="w-5 h-5" />
-                      </button>
-                    </div>
-                    <p className="text-xs text-muted-foreground">Sign in as a Global Admin — the app will be created automatically once you do.</p>
-                  </div>
-                  <div className="flex items-center gap-2 text-sm text-muted-foreground justify-center">
-                    <Loader2 className="w-4 h-4 animate-spin" />
-                    Waiting for sign-in…
-                  </div>
-                  <Button variant="outline" size="sm" onClick={resetAuto} className="w-full">
-                    Cancel
-                  </Button>
-                </div>
-              )}
-
-              {/* Step: creating app */}
-              {auto.step === 'creating' && (
-                <div className="flex flex-col items-center justify-center gap-4 py-8">
-                  <Loader2 className="w-8 h-8 animate-spin text-primary" />
-                  <p className="text-sm font-medium">Creating app registration and saving credentials…</p>
-                </div>
-              )}
-
-              {/* Step: done */}
-              {auto.step === 'done' && auto.result && (
-                <div className="space-y-4 py-2">
-                  <div className="flex items-center gap-2 text-emerald-700 dark:text-emerald-400">
-                    <CheckCircle2 className="w-5 h-5" />
-                    <span className="font-semibold">App registration created successfully!</span>
-                  </div>
-                  <div className="rounded-lg border bg-muted/30 p-4 space-y-2 text-sm font-mono">
-                    <div><span className="text-muted-foreground">App Name: </span>{auto.result.displayName}</div>
-                    <div><span className="text-muted-foreground">Client ID: </span>{auto.result.clientId}</div>
-                    <div><span className="text-muted-foreground">Tenant ID: </span>{auto.result.tenantId}</div>
-                    <div><span className="text-muted-foreground">Secret: </span>{'•'.repeat(16)} <span className="text-xs text-muted-foreground">(saved securely)</span></div>
-                  </div>
-                  {auto.result.consentGranted ? (
-                    <div className="flex items-center gap-2 text-sm text-emerald-700 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-950/30 border border-emerald-200 dark:border-emerald-800 rounded-lg p-3">
-                      <CheckCircle2 className="w-4 h-4 flex-shrink-0" />
-                      Admin consent was granted automatically for all required permissions.
-                    </div>
-                  ) : (
-                    <div className="space-y-2">
-                      <p className="text-sm text-amber-700 dark:text-amber-400 bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 rounded-lg p-3">
-                        Automatic consent grant was not completed — click below to grant permissions manually (takes ~10 seconds).
-                      </p>
-                      <Button
-                        variant="outline"
-                        className="w-full gap-2"
-                        onClick={() => window.open(auto.result!.consentUrl, '_blank')}
-                        data-testid={`button-grant-consent-auto-${tenantType}`}
-                      >
-                        <KeyRound className="w-4 h-4" />
-                        Grant Admin Consent Now
-                      </Button>
-                    </div>
-                  )}
-                  <Button onClick={() => setAutoOpen(false)} className="w-full" data-testid={`button-close-auto-done-${tenantType}`}>
-                    Done — Credentials Saved
-                  </Button>
-                </div>
-              )}
-
-              {/* Step: error */}
-              {auto.step === 'error' && (
-                <div className="space-y-4 py-2">
-                  <div className="flex items-start gap-2 text-red-700 dark:text-red-400 bg-red-50 dark:bg-red-950/30 border border-red-200 dark:border-red-800 rounded-lg p-3 text-sm">
-                    <XCircle className="w-4 h-4 mt-0.5 flex-shrink-0" />
-                    <span>{auto.error}</span>
-                  </div>
-                  <Button variant="outline" onClick={resetAuto} className="w-full">Try Again</Button>
-                </div>
-              )}
-            </DialogContent>
-          </Dialog>
+          <Button
+            onClick={handleConnect}
+            size="sm"
+            className="gap-2"
+            data-testid={`button-connect-tenant-${tenantType}`}
+          >
+            <Wand2 className="w-4 h-4" />
+            {isConnected ? 'Reconnect with Microsoft' : 'Connect with Microsoft'}
+          </Button>
         </div>
         <CardDescription>
-          Microsoft Entra ID App Registration credentials for the {tenantType} tenant.
+          {isConnected
+            ? 'This tenant is connected. Grant permissions below for each migration service you need.'
+            : 'Click "Connect with Microsoft" to sign in as a Global Admin and automatically set up the app registration.'}
         </CardDescription>
       </CardHeader>
-      <CardContent className="space-y-5">
-        <div className="space-y-2">
-          <Label className="text-sm font-medium">Tenant ID</Label>
-          <Input
-            value={tenantId}
-            disabled
-            className="font-mono bg-muted/50"
-            data-testid={`input-${tenantType}-tenant-id`}
-          />
-          <p className="text-xs text-muted-foreground">Set when creating the project. Edit in project settings to change.</p>
-        </div>
 
-        <div className="space-y-2">
-          <Label className="text-sm font-medium">Application (Client) ID</Label>
-          <Input
-            value={localClientId}
-            onChange={(e) => setLocalClientId(e.target.value)}
-            placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
-            className="font-mono"
-            data-testid={`input-${tenantType}-client-id`}
-          />
-        </div>
-
-        <div className="space-y-2">
-          <Label className="text-sm font-medium">Client Secret</Label>
-          <div className="flex gap-2">
-            <div className="relative flex-1">
-              <Input
-                type={showSecret ? 'text' : 'password'}
-                value={localClientSecret}
-                onChange={(e) => setLocalClientSecret(e.target.value)}
-                placeholder={hasExistingSecret ? "Secret saved — enter new value to replace" : "Enter client secret value"}
-                className="font-mono pr-10"
-                data-testid={`input-${tenantType}-client-secret`}
-              />
-              <button
-                type="button"
-                onClick={() => setShowSecret(!showSecret)}
-                className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground transition-colors"
-                data-testid={`button-toggle-${tenantType}-secret`}
-              >
-                {showSecret ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-              </button>
+      <CardContent className="space-y-6">
+        {/* Per-service grant permissions */}
+        {isConnected && (
+          <div className="space-y-3">
+            <Label className="text-sm font-semibold">Grant Permissions by Service</Label>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              {SERVICES.map(({ key, label: svcLabel, description, icon }) => {
+                const Icon = SERVICE_ICONS[icon];
+                const granted = grantedServices.has(key);
+                return (
+                  <div
+                    key={key}
+                    className={`flex items-start gap-3 p-3 rounded-lg border transition-colors ${
+                      granted
+                        ? 'border-emerald-200 dark:border-emerald-800 bg-emerald-50 dark:bg-emerald-950/30'
+                        : 'border-border bg-muted/20 hover:bg-muted/40'
+                    }`}
+                    data-testid={`service-card-${tenantType}-${key}`}
+                  >
+                    <div className={`mt-0.5 ${granted ? 'text-emerald-600 dark:text-emerald-400' : 'text-muted-foreground'}`}>
+                      <Icon className="w-4 h-4" />
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <p className="text-sm font-medium leading-tight">{svcLabel}</p>
+                      <p className="text-xs text-muted-foreground mt-0.5">{description}</p>
+                    </div>
+                    <Button
+                      size="sm"
+                      variant={granted ? 'outline' : 'default'}
+                      className="shrink-0 text-xs h-7 px-2"
+                      onClick={() => handleGrantService(key)}
+                      data-testid={`button-grant-${tenantType}-${key}`}
+                    >
+                      {granted ? <><CheckCircle2 className="w-3 h-3 mr-1" />Granted</> : <><KeyRound className="w-3 h-3 mr-1" />Grant</>}
+                    </Button>
+                  </div>
+                );
+              })}
             </div>
           </div>
-        </div>
+        )}
 
-        <div className="flex flex-wrap items-center gap-3 pt-2">
-          <Button onClick={handleSave} disabled={isSaving} data-testid={`button-save-${tenantType}-credentials`}>
-            {isSaving ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : null}
-            Save Credentials
-          </Button>
-          <Button
-            variant="outline"
-            onClick={handleTestConnection}
-            disabled={isTesting || !hasCredentials}
-            data-testid={`button-test-${tenantType}-connection`}
-          >
-            {isTesting ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : null}
-            Test Connection
-          </Button>
-          <Button
-            variant="outline"
-            disabled={!tenantId || !localClientId}
-            onClick={() => {
-              const redirectUri = encodeURIComponent(window.location.origin);
-              const url = `https://login.microsoftonline.com/${tenantId}/adminconsent?client_id=${localClientId}&redirect_uri=${redirectUri}`;
-              window.open(url, '_blank');
-            }}
-            data-testid={`button-consent-${tenantType}`}
-          >
-            <KeyRound className="w-4 h-4 mr-2" />
-            Grant App Permissions
-          </Button>
-        </div>
+        {/* Divider + manual section */}
+        <details className="group">
+          <summary className="cursor-pointer text-xs text-muted-foreground hover:text-foreground select-none flex items-center gap-1 list-none">
+            <span className="border rounded px-1.5 py-0.5 group-open:hidden">▸</span>
+            <span className="border rounded px-1.5 py-0.5 hidden group-open:inline">▾</span>
+            Manual credential entry
+          </summary>
+          <div className="mt-4 space-y-4 pl-1">
+            <div className="space-y-2">
+              <Label className="text-sm font-medium">Tenant ID</Label>
+              <Input value={tenantId} disabled className="font-mono bg-muted/50" data-testid={`input-${tenantType}-tenant-id`} />
+              <p className="text-xs text-muted-foreground">Set when creating the project.</p>
+            </div>
+            <div className="space-y-2">
+              <Label className="text-sm font-medium">Application (Client) ID</Label>
+              <Input
+                value={localClientId}
+                onChange={(e) => setLocalClientId(e.target.value)}
+                placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+                className="font-mono"
+                data-testid={`input-${tenantType}-client-id`}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label className="text-sm font-medium">Client Secret</Label>
+              <div className="relative">
+                <Input
+                  type={showSecret ? 'text' : 'password'}
+                  value={localClientSecret}
+                  onChange={(e) => setLocalClientSecret(e.target.value)}
+                  placeholder={hasExistingSecret ? "Secret saved — enter new value to replace" : "Enter client secret value"}
+                  className="font-mono pr-10"
+                  data-testid={`input-${tenantType}-client-secret`}
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowSecret(!showSecret)}
+                  className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground transition-colors"
+                  data-testid={`button-toggle-${tenantType}-secret`}
+                >
+                  {showSecret ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                </button>
+              </div>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <Button size="sm" onClick={handleSave} disabled={isSaving} data-testid={`button-save-${tenantType}-credentials`}>
+                {isSaving ? <Loader2 className="w-3 h-3 animate-spin mr-1" /> : null}
+                Save
+              </Button>
+              <Button size="sm" variant="outline" onClick={handleTestConnection} disabled={isTesting || !hasCredentials} data-testid={`button-test-${tenantType}-connection`}>
+                {isTesting ? <Loader2 className="w-3 h-3 animate-spin mr-1" /> : null}
+                Test Connection
+              </Button>
+            </div>
+          </div>
+        </details>
 
         {testResult && (
           <div
@@ -921,11 +798,7 @@ function TenantCredentialForm({
             }`}
             data-testid={`status-${tenantType}-connection-result`}
           >
-            {testResult.success ? (
-              <CheckCircle2 className="w-4 h-4 mt-0.5 flex-shrink-0" />
-            ) : (
-              <XCircle className="w-4 h-4 mt-0.5 flex-shrink-0" />
-            )}
+            {testResult.success ? <CheckCircle2 className="w-4 h-4 mt-0.5 flex-shrink-0" /> : <XCircle className="w-4 h-4 mt-0.5 flex-shrink-0" />}
             <span>{testResult.message}</span>
           </div>
         )}

@@ -9,7 +9,7 @@ import { migrateItem, migrateAllPending } from "./services/migration-engine";
 import { GraphClient } from "./services/graph-client";
 import { discoverUsers, discoverSharePointSites, discoverTeams, discoverPowerPlatform } from "./services/discovery-service";
 import { discoverCloudOnlyUsers, testAdConnection, migrateUserToAd, generatePowerShellScript, type AdConnectionConfig } from "./services/entra-ad-service";
-import { startDeviceCodeFlow, pollAndCreateApp } from "./services/app-registration-service";
+import { buildConnectUrl, handleOAuthCallback, buildConsentUrl, SERVICE_PERMISSION_GROUPS, type ServiceKey } from "./services/oauth-tenant-service";
 
 function maskSecret(value: string | null): string | null {
   if (!value) return null;
@@ -510,47 +510,78 @@ export async function registerRoutes(
     }
   });
 
-  // ── Auto App Registration (device code flow) ──────────────────────────────
+  // ── OAuth2 tenant connection (auth code + PKCE) ───────────────────────────
 
-  app.post('/api/create-app/start', requireAuth, async (req, res) => {
+  // Step 1: Redirect browser to Microsoft login
+  app.get('/api/oauth/connect', requireAuth, (req, res) => {
     try {
-      const { tenantId } = req.body as { tenantId: string };
-      if (!tenantId?.trim()) return res.status(400).json({ message: 'tenantId is required' });
-      const result = await startDeviceCodeFlow(tenantId.trim());
-      res.json(result);
+      const { projectId, tenantType, tenantId, appName } = req.query as Record<string, string>;
+      if (!projectId || !tenantType || !tenantId) {
+        return res.status(400).send('Missing projectId, tenantType, or tenantId');
+      }
+      const url = buildConnectUrl(
+        tenantId,
+        parseInt(projectId),
+        tenantType as 'source' | 'target',
+        appName || 'Tenant Migration Tool',
+      );
+      res.redirect(url);
     } catch (err: any) {
-      res.status(500).json({ message: err.message });
+      res.redirect(`/?oauth_error=${encodeURIComponent(err.message)}`);
     }
   });
 
-  app.post('/api/create-app/poll', requireAuth, async (req, res) => {
+  // Step 2: Microsoft redirects back here with code
+  // Note: no /api prefix — must match registered redirect URI exactly
+  app.get('/oauth/callback', async (req, res) => {
+    const { code, state, error, error_description } = req.query as Record<string, string>;
+
+    if (error) {
+      const msg = error_description || error || 'Authentication failed';
+      return res.redirect(`/?oauth_error=${encodeURIComponent(msg)}`);
+    }
+    if (!code || !state) {
+      return res.redirect('/?oauth_error=Missing+code+or+state');
+    }
+
     try {
-      const { requestId, appName } = req.body as { requestId: string; appName: string };
-      if (!requestId) return res.status(400).json({ message: 'requestId is required' });
-      const result = await pollAndCreateApp(requestId, appName || 'Tenant Migration Tool');
-      res.json(result);
+      const result = await handleOAuthCallback(code, state);
+      const updates = result.tenantType === 'source'
+        ? { sourceClientId: result.clientId, sourceClientSecret: result.clientSecret }
+        : { targetClientId: result.clientId, targetClientSecret: result.clientSecret };
+      await storage.updateProject(result.projectId, updates);
+      res.redirect(`/projects/${result.projectId}?oauth_success=${result.tenantType}&app=${encodeURIComponent(result.displayName)}`);
     } catch (err: any) {
-      res.status(500).json({ message: err.message });
+      res.redirect(`/?oauth_error=${encodeURIComponent(err.message)}`);
     }
   });
 
-  // After auto-create completes, save credentials to a project
-  app.post('/api/projects/:id/save-app-credentials', requireAuth, async (req, res) => {
-    try {
-      const projectId = parseInt(req.params['id'] as string);
-      const { tenantType, clientId, clientSecret } = req.body as {
-        tenantType: 'source' | 'target';
-        clientId: string;
-        clientSecret: string;
-      };
-      const updates = tenantType === 'source'
-        ? { sourceClientId: clientId, sourceClientSecret: clientSecret }
-        : { targetClientId: clientId, targetClientSecret: clientSecret };
-      const project = await storage.updateProject(projectId, updates);
-      res.json(sanitizeProject(project));
-    } catch (err: any) {
-      res.status(500).json({ message: err.message });
+  // Consent callback — just close/redirect back
+  app.get('/oauth/consent-complete', (req, res) => {
+    const { error, error_description } = req.query as Record<string, string>;
+    if (error) {
+      res.send(`<html><body><script>window.opener?.postMessage({type:'consent_error',error:${JSON.stringify(error_description||error)}},location.origin);window.close();</script><p>Error: ${error_description||error}</p></body></html>`);
+    } else {
+      res.send(`<html><body><script>window.opener?.postMessage({type:'consent_success'},location.origin);window.close();</script><p>Permissions granted. You can close this window.</p></body></html>`);
     }
+  });
+
+  // Return service permission groups so the frontend can render grant buttons
+  app.get('/api/oauth/services', requireAuth, (req, res) => {
+    res.json(SERVICE_PERMISSION_GROUPS);
+  });
+
+  // Build consent URL for a specific service
+  app.get('/api/oauth/consent-url', requireAuth, (req, res) => {
+    const { tenantId, clientId, service } = req.query as Record<string, string>;
+    if (!tenantId || !clientId || !service) {
+      return res.status(400).json({ message: 'tenantId, clientId, and service are required' });
+    }
+    if (!(service in SERVICE_PERMISSION_GROUPS)) {
+      return res.status(400).json({ message: 'Invalid service key' });
+    }
+    const url = buildConsentUrl(tenantId, clientId, service as ServiceKey);
+    res.json({ url });
   });
 
   // Seed data if empty
