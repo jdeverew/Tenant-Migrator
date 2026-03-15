@@ -1,11 +1,13 @@
 import type { Express } from "express";
 import { createServer, type Server } from "http";
 import { storage } from "./storage";
-import { setupSession, registerAuthRoutes } from "./auth";
+import { setupSession, registerAuthRoutes, isAuthenticated as requireAuth } from "./auth";
 import { api } from "@shared/routes";
 import { z } from "zod";
 import type { Project } from "@shared/schema";
 import { migrateItem, migrateAllPending } from "./services/migration-engine";
+import { GraphClient } from "./services/graph-client";
+import { discoverUsers, discoverSharePointSites, discoverTeams, discoverPowerPlatform } from "./services/discovery-service";
 
 function maskSecret(value: string | null): string | null {
   if (!value) return null;
@@ -240,6 +242,94 @@ export async function registerRoutes(
         success: false,
         message: `Connection error: ${err.message || 'Network error'}`,
       });
+    }
+  });
+
+  // ===================== DISCOVERY ROUTES =====================
+
+  app.get('/api/projects/:id/discover/:type', requireAuth, async (req, res) => {
+    try {
+      const projectId = parseInt(req.params['id'] as string);
+      const project = await storage.getProject(projectId);
+      if (!project) return res.status(404).json({ message: 'Project not found' });
+
+      const missingCreds: string[] = [];
+      if (!project.sourceTenantId) missingCreds.push('Source Tenant ID');
+      if (!project.sourceClientId) missingCreds.push('Source Client ID');
+      if (!project.sourceClientSecret) missingCreds.push('Source Client Secret');
+      if (missingCreds.length) return res.status(400).json({ message: `Missing source credentials: ${missingCreds.join(', ')}` });
+
+      const source = new GraphClient(project.sourceTenantId!, project.sourceClientId!, project.sourceClientSecret!);
+      const type = req.params['type'] as string;
+
+      let data: any;
+      switch (type) {
+        case 'users': data = await discoverUsers(source); break;
+        case 'sharepoint': data = await discoverSharePointSites(source); break;
+        case 'teams': data = await discoverTeams(source); break;
+        case 'powerplatform': data = await discoverPowerPlatform(source); break;
+        default: return res.status(400).json({ message: `Unknown discovery type: ${type}` });
+      }
+
+      res.json({ type, data });
+    } catch (err: any) {
+      res.status(500).json({ message: err.message || 'Discovery failed' });
+    }
+  });
+
+  // ===================== MAPPING RULES ROUTES =====================
+
+  app.get('/api/projects/:id/mapping-rules', requireAuth, async (req, res) => {
+    try {
+      const rules = await storage.getMappingRules(parseInt(req.params['id'] as string));
+      res.json(rules);
+    } catch (err: any) {
+      res.status(500).json({ message: err.message });
+    }
+  });
+
+  app.post('/api/projects/:id/mapping-rules', requireAuth, async (req, res) => {
+    try {
+      const { ruleType, sourcePattern, targetPattern, description } = req.body;
+      if (!ruleType || !sourcePattern || !targetPattern) {
+        return res.status(400).json({ message: 'ruleType, sourcePattern, and targetPattern are required' });
+      }
+      const rule = await storage.createMappingRule({
+        projectId: parseInt(req.params['id'] as string),
+        ruleType,
+        sourcePattern,
+        targetPattern,
+        description: description || null,
+      });
+      res.status(201).json(rule);
+    } catch (err: any) {
+      res.status(500).json({ message: err.message });
+    }
+  });
+
+  app.delete('/api/projects/:id/mapping-rules/:ruleId', requireAuth, async (req, res) => {
+    try {
+      await storage.deleteMappingRule(parseInt(req.params['ruleId'] as string));
+      res.json({ success: true });
+    } catch (err: any) {
+      res.status(500).json({ message: err.message });
+    }
+  });
+
+  app.post('/api/projects/:id/apply-mapping', requireAuth, async (req, res) => {
+    try {
+      const { identities } = req.body as { identities: string[] };
+      if (!Array.isArray(identities)) return res.status(400).json({ message: 'identities must be an array' });
+      const pid = parseInt(req.params['id'] as string);
+      const results = await Promise.all(
+        identities.map(async (identity) => ({
+          source: identity,
+          target: await storage.applyMappingRules(pid, identity),
+        }))
+      );
+      res.json(results);
+    } catch (err: any) {
+      res.status(500).json({ message: err.message });
     }
   });
 

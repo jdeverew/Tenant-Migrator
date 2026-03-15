@@ -480,7 +480,7 @@ async function migrateSharePoint(
 
     const targetDrives = await target.getAllPages<any>(`/sites/${targetSite.id}/drives`);
 
-    const counters = { migrated: 0, failed: 0, total: 0 };
+    const counters = { migrated: 0, failed: 0, total: 0, bytesMigrated: 0, bytesTotal: 0 };
 
     for (const drive of sourceDrives) {
       logs.push(logEntry(`Processing document library: ${drive.name}`));
@@ -525,6 +525,202 @@ async function migrateSharePoint(
   }
 }
 
+async function migrateUser(
+  source: GraphClient,
+  target: GraphClient,
+  sourceIdentity: string,
+  targetIdentity: string,
+  itemId: number
+): Promise<void> {
+  const logs: string[] = [];
+  logs.push(logEntry(`Starting user migration: ${sourceIdentity} → ${targetIdentity}`));
+  await updateItemProgress(itemId, 'in_progress', logs);
+
+  try {
+    logs.push(logEntry(`Looking up source user: ${sourceIdentity}`));
+    const sourceUser = await source.get(
+      `/users/${sourceIdentity}?$select=id,displayName,givenName,surname,jobTitle,department,usageLocation,mobilePhone,businessPhones,officeLocation`
+    );
+
+    const mailNickname = targetIdentity.split('@')[0].replace(/[^a-zA-Z0-9]/g, '');
+    const tempPassword = `Migr@tion${Math.random().toString(36).slice(-6).toUpperCase()}1!`;
+
+    logs.push(logEntry(`Creating user in target tenant: ${targetIdentity}`));
+
+    const newUser = await target.post('/users', {
+      accountEnabled: true,
+      displayName: sourceUser.displayName,
+      givenName: sourceUser.givenName || '',
+      surname: sourceUser.surname || '',
+      mailNickname,
+      userPrincipalName: targetIdentity,
+      jobTitle: sourceUser.jobTitle || null,
+      department: sourceUser.department || null,
+      usageLocation: sourceUser.usageLocation || 'US',
+      mobilePhone: sourceUser.mobilePhone || null,
+      officeLocation: sourceUser.officeLocation || null,
+      passwordProfile: {
+        forceChangePasswordNextSignIn: true,
+        password: tempPassword,
+      },
+    });
+
+    logs.push(logEntry(`✓ User created: ${newUser.userPrincipalName} (ID: ${newUser.id})`));
+    logs.push(logEntry(`Temporary password: ${tempPassword} (user must change on first login)`));
+    logs.push(logEntry(`User migration complete. Remember to assign licences in the target tenant.`));
+    await updateItemProgress(itemId, 'completed', logs);
+  } catch (err: any) {
+    const msg = err.message || String(err);
+    if (msg.includes('409') || msg.toLowerCase().includes('already exists')) {
+      logs.push(logEntry(`User ${targetIdentity} already exists in target tenant — skipping creation.`));
+      await updateItemProgress(itemId, 'completed', logs);
+    } else {
+      logs.push(logEntry(`User migration failed: ${msg}`));
+      await updateItemProgress(itemId, 'failed', logs, msg);
+    }
+  }
+}
+
+async function pollTeamProvisioning(target: GraphClient, operationUrl: string, logs: string[], maxWaitMs = 120000): Promise<string> {
+  const start = Date.now();
+  while (Date.now() - start < maxWaitMs) {
+    await new Promise(r => setTimeout(r, 5000));
+    try {
+      const status = await target.get(operationUrl);
+      if (status.status === 'succeeded' && status.targetResourceId) {
+        return status.targetResourceId;
+      }
+      if (status.status === 'failed') {
+        throw new Error(`Team provisioning failed: ${status.error?.message || 'Unknown error'}`);
+      }
+      logs.push(logEntry(`Team provisioning status: ${status.status}...`));
+    } catch (e: any) {
+      if (e.message?.includes('provisioning failed')) throw e;
+      // ignore transient errors
+    }
+  }
+  throw new Error('Team provisioning timed out after 2 minutes');
+}
+
+async function migrateTeam(
+  source: GraphClient,
+  target: GraphClient,
+  sourceIdentity: string,
+  targetIdentity: string,
+  itemId: number
+): Promise<void> {
+  const logs: string[] = [];
+  logs.push(logEntry(`Starting Teams migration: ${sourceIdentity} → ${targetIdentity}`));
+  await updateItemProgress(itemId, 'in_progress', logs);
+
+  try {
+    // Resolve source team by display name or ID
+    logs.push(logEntry('Resolving source team...'));
+    let sourceTeam: any;
+    try {
+      sourceTeam = await source.get(`/teams/${sourceIdentity}`);
+    } catch {
+      const search = await source.get(`/groups?$filter=displayName eq '${sourceIdentity}' and resourceProvisioningOptions/Any(x:x eq 'Team')&$select=id,displayName,description,visibility`);
+      if (!search.value || search.value.length === 0) throw new Error(`Team "${sourceIdentity}" not found in source tenant`);
+      sourceTeam = search.value[0];
+    }
+
+    const teamName = targetIdentity || sourceTeam.displayName;
+    logs.push(logEntry(`Found source team: ${sourceTeam.displayName} (${sourceTeam.id})`));
+
+    // Check if target team already exists
+    let targetTeamId: string | null = null;
+    logs.push(logEntry(`Checking if team "${teamName}" exists in target...`));
+    try {
+      const existing = await target.get(`/groups?$filter=displayName eq '${teamName}' and resourceProvisioningOptions/Any(x:x eq 'Team')&$select=id`);
+      if (existing.value && existing.value.length > 0) {
+        targetTeamId = existing.value[0].id;
+        logs.push(logEntry(`Team already exists in target (ID: ${targetTeamId}) — will migrate content into it.`));
+      }
+    } catch { }
+
+    if (!targetTeamId) {
+      logs.push(logEntry(`Creating team "${teamName}" in target tenant...`));
+      const res = await target.request('/teams', {
+        method: 'POST',
+        body: JSON.stringify({
+          'template@odata.bind': "https://graph.microsoft.com/v1.0/teamsTemplates('standard')",
+          displayName: teamName,
+          description: sourceTeam.description || '',
+          visibility: sourceTeam.visibility || 'Private',
+        }),
+      });
+
+      if (res.status === 202) {
+        const location = res.headers.get('Location') || '';
+        const operationPath = location.replace('https://graph.microsoft.com/v1.0', '');
+        logs.push(logEntry('Team creation accepted — waiting for provisioning (up to 2 min)...'));
+        await updateItemProgress(itemId, 'in_progress', logs);
+        targetTeamId = await pollTeamProvisioning(target, operationPath, logs);
+        logs.push(logEntry(`✓ Team provisioned (ID: ${targetTeamId})`));
+      } else if (res.ok) {
+        const data = await res.json();
+        targetTeamId = data.id;
+      } else {
+        const err = await res.text();
+        throw new Error(`Failed to create team: ${err}`);
+      }
+    }
+
+    // Get source channels
+    logs.push(logEntry('Reading source channels...'));
+    const sourceChannels = await source.getAllPages<any>(`/teams/${sourceTeam.id}/channels`);
+    logs.push(logEntry(`Found ${sourceChannels.length} channels in source team`));
+
+    const targetChannels = await target.getAllPages<any>(`/teams/${targetTeamId}/channels`);
+    const existingChannelNames = new Set(targetChannels.map((c: any) => c.displayName.toLowerCase()));
+
+    const counters = { migrated: 0, failed: 0, total: 0, bytesMigrated: 0, bytesTotal: 0 };
+
+    for (const channel of sourceChannels) {
+      if (channel.membershipType === 'standard' && channel.displayName.toLowerCase() === 'general') {
+        logs.push(logEntry(`Skipping "General" channel creation (auto-exists).`));
+      } else if (!existingChannelNames.has(channel.displayName.toLowerCase())) {
+        try {
+          await target.post(`/teams/${targetTeamId}/channels`, {
+            displayName: channel.displayName,
+            description: channel.description || '',
+            membershipType: 'standard',
+          });
+          logs.push(logEntry(`✓ Created channel: ${channel.displayName}`));
+        } catch (err: any) {
+          logs.push(logEntry(`Could not create channel "${channel.displayName}": ${err.message}`));
+        }
+      }
+
+      // Migrate channel files via SharePoint
+      try {
+        const filesFolder = await source.get(`/teams/${sourceTeam.id}/channels/${channel.id}/filesFolder`);
+        const targetFilesFolder = await target.get(`/teams/${targetTeamId}/channels/${channel.id}/filesFolder`).catch(() => null);
+
+        if (filesFolder?.parentReference?.driveId && targetFilesFolder?.parentReference?.driveId) {
+          logs.push(logEntry(`Migrating files for channel: ${channel.displayName}`));
+          await updateItemProgress(itemId, 'in_progress', logs, undefined, counters);
+          await migrateDriveItemsRecursive(
+            source, target,
+            filesFolder.parentReference.driveId, targetFilesFolder.parentReference.driveId,
+            filesFolder.id, `/${channel.displayName}`,
+            itemId, logs, counters
+          );
+        }
+      } catch (err: any) {
+        logs.push(logEntry(`Could not migrate files for "${channel.displayName}": ${err.message}`));
+      }
+    }
+
+    logs.push(logEntry(`Teams migration complete: ${counters.migrated} files migrated (${formatBytes(counters.bytesMigrated)}), ${counters.failed} failed`));
+    await updateItemProgress(itemId, 'completed', logs, undefined, counters);
+  } catch (err: any) {
+    logs.push(logEntry(`Teams migration failed: ${err.message}`));
+    await updateItemProgress(itemId, 'failed', logs, err.message);
+  }
+}
+
 export async function migrateItem(projectId: number, itemId: number): Promise<void> {
   const project = await storage.getProject(projectId);
   if (!project) throw new Error("Project not found");
@@ -553,15 +749,14 @@ export async function migrateItem(projectId: number, itemId: number): Promise<vo
         await migrateSharePoint(source, target, item.sourceIdentity, targetIdentity, itemId);
         break;
       case 'teams':
-        await storage.updateItem(itemId, {
-          status: 'failed',
-          errorDetails: 'Teams migration is not yet supported. Microsoft Graph API does not provide endpoints to migrate Teams channel messages and data between tenants.',
-        });
-        await storage.updateItemLogs(itemId, [
-          logEntry('Teams migration is not supported at this time.'),
-          logEntry('Microsoft Graph API does not expose endpoints for copying Teams messages, channel data, or team structures between tenants.'),
-          logEntry('Consider using Microsoft\'s native Teams migration tools or third-party solutions for Teams data.'),
-        ]);
+        await migrateTeam(source, target, item.sourceIdentity, targetIdentity, itemId);
+        break;
+      case 'user':
+        await migrateUser(source, target, item.sourceIdentity, targetIdentity, itemId);
+        break;
+      case 'powerplatform':
+        await storage.updateItem(itemId, { status: 'failed', errorDetails: 'Power Platform migration requires the Power Platform Admin PowerShell module or CoE Starter Kit. Export/import via Graph API is not supported.' });
+        await storage.updateItemLogs(itemId, [logEntry('Power Platform migration is not supported via Graph API. Use the Power Platform CoE Starter Kit or PowerShell module to export and import Power Apps and Power Automate flows.')]);
         break;
       default:
         await storage.updateItem(itemId, {

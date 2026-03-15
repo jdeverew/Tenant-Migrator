@@ -38,6 +38,21 @@ export const migrationItems = pgTable("migration_items", {
   updatedAt: timestamp("updated_at").defaultNow(),
 });
 
+// === MAPPING RULES ===
+export const mappingRules = pgTable("mapping_rules", {
+  id: serial("id").primaryKey(),
+  projectId: integer("project_id").notNull().references(() => migrationProjects.id),
+  ruleType: text("rule_type").notNull(), // 'domain', 'prefix', 'suffix', 'upn_prefix'
+  sourcePattern: text("source_pattern").notNull(),
+  targetPattern: text("target_pattern").notNull(),
+  description: text("description"),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+export const insertMappingRuleSchema = createInsertSchema(mappingRules).omit({ id: true, createdAt: true });
+export type MappingRule = typeof mappingRules.$inferSelect;
+export type InsertMappingRule = z.infer<typeof insertMappingRuleSchema>;
+
 // === SCHEMAS ===
 export const insertProjectSchema = createInsertSchema(migrationProjects).omit({ id: true, createdAt: true });
 export const insertItemSchema = createInsertSchema(migrationItems).omit({ id: true, updatedAt: true, logs: true });

@@ -2,12 +2,15 @@ import { db } from "./db";
 import {
   migrationProjects,
   migrationItems,
+  mappingRules,
   type Project,
   type InsertProject,
   type MigrationItem,
   type InsertMigrationItem,
   type UpdateProjectRequest,
-  type UpdateItemRequest
+  type UpdateItemRequest,
+  type MappingRule,
+  type InsertMappingRule,
 } from "@shared/schema";
 import { eq, desc, and, count } from "drizzle-orm";
 
@@ -35,6 +38,12 @@ export interface IStorage {
   updateItem(id: number, updates: UpdateItemRequest): Promise<MigrationItem>;
   updateItemLogs(id: number, logs: string[]): Promise<void>;
   deleteItem(id: number): Promise<void>;
+
+  // Mapping Rules
+  getMappingRules(projectId: number): Promise<MappingRule[]>;
+  createMappingRule(rule: InsertMappingRule): Promise<MappingRule>;
+  deleteMappingRule(id: number): Promise<void>;
+  applyMappingRules(projectId: number, sourceIdentity: string): Promise<string>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -129,6 +138,63 @@ export class DatabaseStorage implements IStorage {
   async deleteItem(id: number): Promise<void> {
     await db.delete(migrationItems).where(eq(migrationItems.id, id));
   }
+
+  async getMappingRules(projectId: number): Promise<MappingRule[]> {
+    return await db.select().from(mappingRules).where(eq(mappingRules.projectId, projectId));
+  }
+
+  async createMappingRule(rule: InsertMappingRule): Promise<MappingRule> {
+    const [created] = await db.insert(mappingRules).values(rule).returning();
+    return created;
+  }
+
+  async deleteMappingRule(id: number): Promise<void> {
+    await db.delete(mappingRules).where(eq(mappingRules.id, id));
+  }
+
+  async applyMappingRules(projectId: number, sourceIdentity: string): Promise<string> {
+    const rules = await this.getMappingRules(projectId);
+    let result = sourceIdentity;
+
+    for (const rule of rules) {
+      if (rule.ruleType === 'domain') {
+        // Replace @sourcedomain.com with @targetdomain.com
+        result = result.replace(new RegExp(`@${escapeRegex(rule.sourcePattern)}`, 'gi'), `@${rule.targetPattern}`);
+      } else if (rule.ruleType === 'prefix') {
+        // Add prefix to username part (before @)
+        const atIndex = result.indexOf('@');
+        if (atIndex > -1) {
+          const username = result.substring(0, atIndex);
+          const domain = result.substring(atIndex);
+          if (username.startsWith(rule.sourcePattern)) {
+            result = rule.targetPattern + username.substring(rule.sourcePattern.length) + domain;
+          }
+        }
+      } else if (rule.ruleType === 'suffix') {
+        // Add suffix to username part (before @)
+        const atIndex = result.indexOf('@');
+        if (atIndex > -1) {
+          const username = result.substring(0, atIndex);
+          const domain = result.substring(atIndex);
+          result = username.replace(new RegExp(`${escapeRegex(rule.sourcePattern)}$`, 'i'), rule.targetPattern) + domain;
+        }
+      } else if (rule.ruleType === 'upn_prefix') {
+        // Replace full UPN prefix (everything before first dot in username)
+        const atIndex = result.indexOf('@');
+        if (atIndex > -1) {
+          const username = result.substring(0, atIndex);
+          const domain = result.substring(atIndex);
+          result = username.replace(rule.sourcePattern, rule.targetPattern) + domain;
+        }
+      }
+    }
+
+    return result;
+  }
+}
+
+function escapeRegex(str: string): string {
+  return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 export const storage = new DatabaseStorage();

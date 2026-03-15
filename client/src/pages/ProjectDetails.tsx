@@ -3,7 +3,7 @@ import { useProject, useProjectStats, useUpdateProject } from "@/hooks/use-proje
 import { useMigrationItems, useCreateMigrationItem, useUpdateMigrationItem, useDeleteMigrationItem } from "@/hooks/use-items";
 import { Sidebar } from "@/components/Sidebar";
 import { StatusBadge } from "@/components/StatusBadge";
-import { Loader2, ArrowLeft, Mail, Cloud, Users, Plus, Trash2, RotateCw, Eye, EyeOff, CheckCircle2, XCircle, Shield, ExternalLink, Play, PlayCircle, FileText, Globe, KeyRound } from "lucide-react";
+import { Loader2, ArrowLeft, Mail, Cloud, Users, Plus, Trash2, RotateCw, Eye, EyeOff, CheckCircle2, XCircle, Shield, ExternalLink, Play, PlayCircle, FileText, Globe, KeyRound, Search, UserCheck, MapPin, Zap, AlertTriangle, Import, Boxes } from "lucide-react";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -18,16 +18,16 @@ import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
 import { useToast } from "@/hooks/use-toast";
 import { useState, useEffect } from "react";
-import { type MigrationItem } from "@shared/schema";
+import { type MigrationItem, type MappingRule } from "@shared/schema";
 import { format } from "date-fns";
 import { apiRequest } from "@/lib/queryClient";
-import { useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, buildUrl } from "@shared/routes";
 
 const itemSchema = z.object({
   sourceIdentity: z.string().min(1, "Source identity is required"),
   targetIdentity: z.string().optional().or(z.literal("")),
-  itemType: z.enum(["mailbox", "onedrive", "sharepoint", "teams"]),
+  itemType: z.enum(["mailbox", "onedrive", "sharepoint", "teams", "user", "powerplatform"]),
 });
 
 type ItemFormData = z.infer<typeof itemSchema>;
@@ -46,6 +46,8 @@ function ItemTypeIcon({ type }: { type: string }) {
     case 'onedrive': return <Cloud className="w-4 h-4 text-sky-500" />;
     case 'sharepoint': return <Globe className="w-4 h-4 text-teal-500" />;
     case 'teams': return <Users className="w-4 h-4 text-indigo-500" />;
+    case 'user': return <UserCheck className="w-4 h-4 text-violet-500" />;
+    case 'powerplatform': return <Zap className="w-4 h-4 text-amber-500" />;
     default: return null;
   }
 }
@@ -216,9 +218,11 @@ export default function ProjectDetails() {
           </div>
 
           <Tabs defaultValue="overview" className="space-y-6">
-            <TabsList className="bg-white dark:bg-slate-900 border border-border/50 p-1 rounded-lg">
+            <TabsList className="bg-white dark:bg-slate-900 border border-border/50 p-1 rounded-lg flex-wrap">
               <TabsTrigger value="overview" data-testid="tab-overview">Overview</TabsTrigger>
               <TabsTrigger value="items" data-testid="tab-items">Migration Items</TabsTrigger>
+              <TabsTrigger value="discovery" data-testid="tab-discovery">Discovery</TabsTrigger>
+              <TabsTrigger value="mapping" data-testid="tab-mapping">Auto-Mapping Rules</TabsTrigger>
               <TabsTrigger value="tenant-config" data-testid="tab-tenant-config">Tenant Configuration</TabsTrigger>
             </TabsList>
 
@@ -348,6 +352,8 @@ export default function ProjectDetails() {
                                   <SelectItem value="onedrive">OneDrive</SelectItem>
                                   <SelectItem value="sharepoint">SharePoint</SelectItem>
                                   <SelectItem value="teams">Teams</SelectItem>
+                                  <SelectItem value="user">User Account</SelectItem>
+                                  <SelectItem value="powerplatform">Power Platform</SelectItem>
                                 </SelectContent>
                               </Select>
                             )}
@@ -456,6 +462,18 @@ export default function ProjectDetails() {
                   </div>
                 )}
               </div>
+            </TabsContent>
+
+            <TabsContent value="discovery">
+              <DiscoveryTab projectId={id} onImport={(newItems) => {
+                newItems.forEach(item => createItem(item).catch(() => {}));
+                queryClient.invalidateQueries({ queryKey: [api.items.list.path, id] });
+                toast({ title: "Imported", description: `${newItems.length} item(s) added to migration queue.` });
+              }} />
+            </TabsContent>
+
+            <TabsContent value="mapping">
+              <MappingRulesTab projectId={id} />
             </TabsContent>
 
             <TabsContent value="tenant-config">
@@ -660,6 +678,450 @@ function TenantCredentialForm({
         )}
       </CardContent>
     </Card>
+  );
+}
+
+// ======================== DISCOVERY TAB ========================
+
+type DiscoveryType = 'users' | 'sharepoint' | 'teams' | 'powerplatform';
+
+interface DiscoveryTabProps {
+  projectId: number;
+  onImport: (items: any[]) => void;
+}
+
+function DiscoveryTab({ projectId, onImport }: DiscoveryTabProps) {
+  const [activeType, setActiveType] = useState<DiscoveryType>('users');
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [results, setResults] = useState<any[]>([]);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [targetSuffix, setTargetSuffix] = useState('');
+  const { toast } = useToast();
+
+  const discoveryTypes: { id: DiscoveryType; label: string; icon: any; description: string }[] = [
+    { id: 'users', label: 'Users', icon: UserCheck, description: 'Discover all licensed users with mailbox or OneDrive' },
+    { id: 'sharepoint', label: 'SharePoint Sites', icon: Globe, description: 'Discover all SharePoint sites with storage details' },
+    { id: 'teams', label: 'Microsoft Teams', icon: Users, description: 'Discover all Teams with member and channel counts' },
+    { id: 'powerplatform', label: 'Power Platform', icon: Zap, description: 'Discover Power Apps and Power Automate flows' },
+  ];
+
+  const handleDiscover = async () => {
+    setLoading(true);
+    setError(null);
+    setResults([]);
+    setSelected(new Set());
+    try {
+      const res = await apiRequest('GET', `/api/projects/${projectId}/discover/${activeType}`);
+      const data = await res.json();
+      setResults(data.data || []);
+    } catch (err: any) {
+      setError(err.message || 'Discovery failed. Check source tenant credentials.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const toggleAll = () => {
+    if (selected.size === results.length) {
+      setSelected(new Set());
+    } else {
+      setSelected(new Set(results.map(r => r.id)));
+    }
+  };
+
+  const toggle = (id: string) => {
+    setSelected(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const handleImportSelected = () => {
+    const selectedItems = results.filter(r => selected.has(r.id));
+    const items = selectedItems.map(r => {
+      let sourceIdentity = '';
+      let targetIdentity = '';
+      let itemType = activeType === 'users' ? 'user' : activeType === 'sharepoint' ? 'sharepoint' : activeType === 'teams' ? 'teams' : 'powerplatform';
+
+      if (activeType === 'users') {
+        sourceIdentity = r.userPrincipalName;
+        targetIdentity = targetSuffix ? r.userPrincipalName.replace(/@.*/, `@${targetSuffix}`) : '';
+      } else if (activeType === 'sharepoint') {
+        sourceIdentity = r.webUrl;
+        targetIdentity = targetSuffix || '';
+      } else if (activeType === 'teams') {
+        sourceIdentity = r.id;
+        targetIdentity = r.displayName;
+      } else {
+        sourceIdentity = r.id;
+        targetIdentity = '';
+      }
+
+      return {
+        projectId,
+        sourceIdentity,
+        targetIdentity: targetIdentity || undefined,
+        itemType,
+        status: 'pending',
+      };
+    });
+    onImport(items);
+    setSelected(new Set());
+  };
+
+  const activeTypeConfig = discoveryTypes.find(t => t.id === activeType)!;
+
+  return (
+    <div className="space-y-6">
+      <Card className="shadow-sm">
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2"><Search className="w-5 h-5" /> Source Tenant Discovery</CardTitle>
+          <CardDescription>Scan the source tenant to find users, sites, and teams, then bulk-import them into the migration queue.</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+            {discoveryTypes.map(t => {
+              const Icon = t.icon;
+              return (
+                <button
+                  key={t.id}
+                  data-testid={`button-discover-${t.id}`}
+                  onClick={() => { setActiveType(t.id); setResults([]); setError(null); setSelected(new Set()); }}
+                  className={`flex flex-col items-center gap-2 p-4 rounded-lg border-2 transition-all text-sm font-medium ${
+                    activeType === t.id
+                      ? 'border-primary bg-primary/5 text-primary'
+                      : 'border-border hover:border-primary/50 text-muted-foreground hover:text-foreground'
+                  }`}
+                >
+                  <Icon className="w-5 h-5" />
+                  {t.label}
+                </button>
+              );
+            })}
+          </div>
+
+          <div className="text-sm text-muted-foreground">{activeTypeConfig.description}</div>
+
+          <div className="flex flex-wrap gap-3 items-end">
+            {(activeType === 'users') && (
+              <div className="space-y-1 flex-1 min-w-[200px]">
+                <Label>Target domain suffix (optional)</Label>
+                <Input
+                  placeholder="contoso.com"
+                  value={targetSuffix}
+                  onChange={e => setTargetSuffix(e.target.value)}
+                  data-testid="input-target-domain"
+                />
+              </div>
+            )}
+            <Button onClick={handleDiscover} disabled={loading} data-testid="button-run-discovery">
+              {loading ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : <Search className="w-4 h-4 mr-2" />}
+              {loading ? 'Discovering...' : `Discover ${activeTypeConfig.label}`}
+            </Button>
+          </div>
+
+          {error && (
+            <div className="flex items-start gap-2 p-3 rounded-lg bg-red-50 dark:bg-red-950/30 border border-red-200 dark:border-red-800 text-red-800 dark:text-red-300 text-sm" data-testid="status-discovery-error">
+              <AlertTriangle className="w-4 h-4 mt-0.5 flex-shrink-0" />
+              <span>{error}</span>
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      {results.length > 0 && (
+        <Card className="shadow-sm">
+          <CardHeader>
+            <div className="flex items-center justify-between">
+              <CardTitle>{results.length} {activeTypeConfig.label} Found</CardTitle>
+              <div className="flex gap-2">
+                <Button variant="outline" size="sm" onClick={toggleAll} data-testid="button-select-all">
+                  {selected.size === results.length ? 'Deselect All' : 'Select All'}
+                </Button>
+                <Button size="sm" disabled={selected.size === 0} onClick={handleImportSelected} data-testid="button-import-selected">
+                  <Boxes className="w-4 h-4 mr-2" /> Import Selected ({selected.size})
+                </Button>
+              </div>
+            </div>
+          </CardHeader>
+          <CardContent>
+            <div className="border rounded-lg divide-y divide-border overflow-hidden">
+              {results.map((r) => (
+                <DiscoveryResultRow
+                  key={r.id}
+                  item={r}
+                  type={activeType}
+                  selected={selected.has(r.id)}
+                  onToggle={() => toggle(r.id)}
+                />
+              ))}
+            </div>
+          </CardContent>
+        </Card>
+      )}
+    </div>
+  );
+}
+
+function DiscoveryResultRow({ item, type, selected, onToggle }: { item: any; type: DiscoveryType; selected: boolean; onToggle: () => void }) {
+  if (type === 'users') {
+    return (
+      <div className={`flex items-center gap-3 px-4 py-3 hover:bg-muted/30 transition-colors cursor-pointer ${selected ? 'bg-primary/5' : ''}`} onClick={onToggle} data-testid={`row-user-${item.id}`}>
+        <input type="checkbox" checked={selected} onChange={() => {}} className="rounded" />
+        <UserCheck className={`w-4 h-4 flex-shrink-0 ${item.accountEnabled ? 'text-emerald-500' : 'text-slate-400'}`} />
+        <div className="flex-1 min-w-0">
+          <div className="font-medium text-sm truncate">{item.displayName}</div>
+          <div className="text-xs text-muted-foreground truncate">{item.userPrincipalName}</div>
+        </div>
+        <div className="text-xs text-muted-foreground text-right">
+          <div>{item.department || item.jobTitle || ''}</div>
+          <div className="flex gap-1 justify-end mt-0.5">
+            {item.hasMailbox && <span className="px-1.5 py-0.5 rounded bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300">Mailbox</span>}
+            {item.hasOneDrive && <span className="px-1.5 py-0.5 rounded bg-sky-100 dark:bg-sky-900/30 text-sky-700 dark:text-sky-300">OneDrive</span>}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (type === 'sharepoint') {
+    return (
+      <div className={`flex items-center gap-3 px-4 py-3 hover:bg-muted/30 transition-colors cursor-pointer ${selected ? 'bg-primary/5' : ''}`} onClick={onToggle} data-testid={`row-site-${item.id}`}>
+        <input type="checkbox" checked={selected} onChange={() => {}} className="rounded" />
+        <Globe className="w-4 h-4 flex-shrink-0 text-teal-500" />
+        <div className="flex-1 min-w-0">
+          <div className="font-medium text-sm truncate">{item.displayName}</div>
+          <div className="text-xs text-muted-foreground truncate">{item.webUrl}</div>
+        </div>
+        <div className="text-xs text-muted-foreground text-right">
+          <div className="capitalize">{item.siteType} site</div>
+          {item.storageUsedBytes && <div>{formatBytes(item.storageUsedBytes)} used</div>}
+        </div>
+      </div>
+    );
+  }
+
+  if (type === 'teams') {
+    return (
+      <div className={`flex items-center gap-3 px-4 py-3 hover:bg-muted/30 transition-colors cursor-pointer ${selected ? 'bg-primary/5' : ''}`} onClick={onToggle} data-testid={`row-team-${item.id}`}>
+        <input type="checkbox" checked={selected} onChange={() => {}} className="rounded" />
+        <Users className="w-4 h-4 flex-shrink-0 text-indigo-500" />
+        <div className="flex-1 min-w-0">
+          <div className="font-medium text-sm truncate">{item.displayName}</div>
+          <div className="text-xs text-muted-foreground truncate">{item.description || 'No description'}</div>
+        </div>
+        <div className="text-xs text-muted-foreground text-right">
+          <div>{item.memberCount} members</div>
+          <div>{item.channelCount} channels</div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex items-center gap-3 px-4 py-4 text-sm text-amber-700 dark:text-amber-300 bg-amber-50 dark:bg-amber-950/30" data-testid={`row-powerplatform-${item.id}`}>
+      <AlertTriangle className="w-4 h-4 flex-shrink-0" />
+      <span>{item.note}</span>
+    </div>
+  );
+}
+
+// ======================== MAPPING RULES TAB ========================
+
+function MappingRulesTab({ projectId }: { projectId: number }) {
+  const { toast } = useToast();
+  const queryClient = useQueryClient();
+  const [ruleType, setRuleType] = useState('domain');
+  const [sourcePattern, setSourcePattern] = useState('');
+  const [targetPattern, setTargetPattern] = useState('');
+  const [description, setDescription] = useState('');
+  const [testInput, setTestInput] = useState('');
+  const [testOutput, setTestOutput] = useState('');
+  const [testLoading, setTestLoading] = useState(false);
+  const [saving, setSaving] = useState(false);
+
+  const { data: rules, isLoading } = useQuery<MappingRule[]>({
+    queryKey: ['/api/projects/mapping-rules', projectId],
+    queryFn: async () => {
+      const res = await apiRequest('GET', `/api/projects/${projectId}/mapping-rules`);
+      return res.json();
+    },
+  });
+
+  const handleAddRule = async () => {
+    if (!sourcePattern || !targetPattern) {
+      toast({ title: 'Validation Error', description: 'Source and target patterns are required', variant: 'destructive' });
+      return;
+    }
+    setSaving(true);
+    try {
+      await apiRequest('POST', `/api/projects/${projectId}/mapping-rules`, { ruleType, sourcePattern, targetPattern, description });
+      queryClient.invalidateQueries({ queryKey: ['/api/projects/mapping-rules', projectId] });
+      setSourcePattern(''); setTargetPattern(''); setDescription('');
+      toast({ title: 'Rule Added', description: 'Mapping rule saved successfully' });
+    } catch (err: any) {
+      toast({ title: 'Error', description: err.message, variant: 'destructive' });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleDeleteRule = async (id: number) => {
+    if (!confirm('Delete this mapping rule?')) return;
+    try {
+      await apiRequest('DELETE', `/api/projects/${projectId}/mapping-rules/${id}`);
+      queryClient.invalidateQueries({ queryKey: ['/api/projects/mapping-rules', projectId] });
+      toast({ title: 'Deleted', description: 'Rule removed' });
+    } catch (err: any) {
+      toast({ title: 'Error', description: err.message, variant: 'destructive' });
+    }
+  };
+
+  const handleTest = async () => {
+    if (!testInput) return;
+    setTestLoading(true);
+    try {
+      const res = await apiRequest('POST', `/api/projects/${projectId}/apply-mapping`, { identities: [testInput] });
+      const data = await res.json();
+      setTestOutput(data[0]?.target || testInput);
+    } catch {
+      setTestOutput('Error applying rules');
+    } finally {
+      setTestLoading(false);
+    }
+  };
+
+  const ruleTypeDescriptions: Record<string, string> = {
+    domain: 'Replace the email domain: @sourcedomain.com → @targetdomain.com',
+    prefix: 'Replace username prefix: old.user@domain → new.user@domain',
+    suffix: 'Replace username suffix: user.old@domain → user.new@domain',
+    upn_prefix: 'Replace entire username part: john.smith@domain → jsmith@domain',
+  };
+
+  return (
+    <div className="space-y-6">
+      <Card className="shadow-sm">
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2"><MapPin className="w-5 h-5" /> Auto-Mapping Rules</CardTitle>
+          <CardDescription>Configure rules to automatically transform source identities (UPNs, email addresses) to their target equivalents.</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div className="space-y-2">
+              <Label>Rule Type</Label>
+              <Select value={ruleType} onValueChange={setRuleType}>
+                <SelectTrigger data-testid="select-rule-type">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="domain">Domain Replacement</SelectItem>
+                  <SelectItem value="prefix">Username Prefix</SelectItem>
+                  <SelectItem value="suffix">Username Suffix</SelectItem>
+                  <SelectItem value="upn_prefix">Full UPN Prefix</SelectItem>
+                </SelectContent>
+              </Select>
+              <p className="text-xs text-muted-foreground">{ruleTypeDescriptions[ruleType]}</p>
+            </div>
+
+            <div className="space-y-2">
+              <Label>Description (optional)</Label>
+              <Input placeholder="e.g., Replace old domain" value={description} onChange={e => setDescription(e.target.value)} data-testid="input-rule-description" />
+            </div>
+
+            <div className="space-y-2">
+              <Label>Source Pattern</Label>
+              <Input
+                placeholder={ruleType === 'domain' ? 'acme.com' : 'old.prefix'}
+                value={sourcePattern}
+                onChange={e => setSourcePattern(e.target.value)}
+                data-testid="input-source-pattern"
+              />
+            </div>
+
+            <div className="space-y-2">
+              <Label>Target Pattern</Label>
+              <Input
+                placeholder={ruleType === 'domain' ? 'contoso.com' : 'new.prefix'}
+                value={targetPattern}
+                onChange={e => setTargetPattern(e.target.value)}
+                data-testid="input-target-pattern"
+              />
+            </div>
+          </div>
+
+          <Button onClick={handleAddRule} disabled={saving} data-testid="button-add-rule">
+            {saving ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : <Plus className="w-4 h-4 mr-2" />}
+            Add Rule
+          </Button>
+        </CardContent>
+      </Card>
+
+      <Card className="shadow-sm">
+        <CardHeader>
+          <CardTitle>Existing Rules</CardTitle>
+        </CardHeader>
+        <CardContent>
+          {isLoading ? (
+            <div className="flex justify-center py-6"><Loader2 className="w-6 h-6 animate-spin text-muted-foreground" /></div>
+          ) : !rules || rules.length === 0 ? (
+            <div className="text-center py-8 text-muted-foreground">No mapping rules configured yet.</div>
+          ) : (
+            <div className="border rounded-lg divide-y divide-border overflow-hidden">
+              {rules.map(rule => (
+                <div key={rule.id} className="flex items-center gap-3 px-4 py-3" data-testid={`row-rule-${rule.id}`}>
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2 text-sm font-medium">
+                      <span className="px-2 py-0.5 rounded bg-muted text-xs capitalize">{rule.ruleType}</span>
+                      <span className="font-mono text-red-600 dark:text-red-400">{rule.sourcePattern}</span>
+                      <span className="text-muted-foreground">→</span>
+                      <span className="font-mono text-emerald-600 dark:text-emerald-400">{rule.targetPattern}</span>
+                    </div>
+                    {rule.description && <div className="text-xs text-muted-foreground mt-0.5">{rule.description}</div>}
+                  </div>
+                  <Button variant="ghost" size="sm" onClick={() => handleDeleteRule(rule.id)} data-testid={`button-delete-rule-${rule.id}`}>
+                    <Trash2 className="w-4 h-4 text-red-500" />
+                  </Button>
+                </div>
+              ))}
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      <Card className="shadow-sm">
+        <CardHeader>
+          <CardTitle>Test Rules</CardTitle>
+          <CardDescription>Enter a source UPN or email to preview how the rules transform it.</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="flex gap-3 items-end">
+            <div className="flex-1 space-y-1">
+              <Label>Test Input</Label>
+              <Input
+                placeholder="john.smith@acme.com"
+                value={testInput}
+                onChange={e => setTestInput(e.target.value)}
+                onKeyDown={e => e.key === 'Enter' && handleTest()}
+                data-testid="input-test-identity"
+              />
+            </div>
+            <Button variant="outline" onClick={handleTest} disabled={testLoading || !testInput} data-testid="button-test-mapping">
+              {testLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Preview'}
+            </Button>
+          </div>
+          {testOutput && (
+            <div className="flex items-center gap-3 p-3 rounded-lg bg-muted/50">
+              <span className="font-mono text-sm text-muted-foreground">{testInput}</span>
+              <span className="text-muted-foreground">→</span>
+              <span className="font-mono text-sm font-semibold text-emerald-600 dark:text-emerald-400" data-testid="text-mapping-result">{testOutput}</span>
+            </div>
+          )}
+        </CardContent>
+      </Card>
+    </div>
   );
 }
 
