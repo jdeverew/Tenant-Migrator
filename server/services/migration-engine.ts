@@ -19,10 +19,25 @@ function getGraphClients(project: Project): { source: GraphClient; target: Graph
   };
 }
 
-async function updateItemProgress(itemId: number, status: string, logs: string[], errorDetails?: string) {
+async function updateItemProgress(
+  itemId: number,
+  status: string,
+  logs: string[],
+  errorDetails?: string,
+  bytes?: { bytesMigrated: number; bytesTotal: number }
+) {
+  const progressPercent = bytes && bytes.bytesTotal > 0
+    ? Math.min(100, Math.round((bytes.bytesMigrated / bytes.bytesTotal) * 100))
+    : undefined;
+
   await storage.updateItem(itemId, {
     status,
     errorDetails: errorDetails || null,
+    ...(bytes !== undefined ? {
+      bytesMigrated: bytes.bytesMigrated,
+      bytesTotal: bytes.bytesTotal,
+      progressPercent: progressPercent ?? 0,
+    } : {}),
   });
   await storage.updateItemLogs(itemId, logs);
 }
@@ -187,6 +202,13 @@ async function migrateMailbox(
   }
 }
 
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+  return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GB`;
+}
+
 async function migrateDriveItemsRecursive(
   source: GraphClient,
   target: GraphClient,
@@ -196,7 +218,7 @@ async function migrateDriveItemsRecursive(
   targetParentPath: string,
   itemId: number,
   logs: string[],
-  counters: { migrated: number; failed: number; total: number }
+  counters: { migrated: number; failed: number; total: number; bytesMigrated: number; bytesTotal: number }
 ): Promise<void> {
   const listPath = sourceParentItemId
     ? `/drives/${sourceDriveId}/items/${sourceParentItemId}/children?$top=200`
@@ -209,7 +231,7 @@ async function migrateDriveItemsRecursive(
 
     if (item.folder) {
       logs.push(logEntry(`Processing folder: ${item.name}`));
-      await updateItemProgress(itemId, 'in_progress', logs);
+      await updateItemProgress(itemId, 'in_progress', logs, undefined, counters);
 
       try {
         try {
@@ -219,10 +241,9 @@ async function migrateDriveItemsRecursive(
             "@microsoft.graph.conflictBehavior": "replace",
           });
         } catch {
-          // may fail if folder exists or if we need to create via simple put - that's ok
+          // may fail if folder exists — that's ok
         }
 
-        // Create folder via upload of a placeholder or just recurse (Graph creates parent folders on file upload)
         await migrateDriveItemsRecursive(
           source, target,
           sourceDriveId, targetDriveId,
@@ -241,8 +262,8 @@ async function migrateDriveItemsRecursive(
         const targetPath = `/drives/${targetDriveId}/root:${targetParentPath}/${item.name}:/content`;
 
         if (fileSize > 4 * 1024 * 1024) {
-          logs.push(logEntry(`Uploading large file: ${item.name} (${(fileSize / 1024 / 1024).toFixed(1)} MB)`));
-          await updateItemProgress(itemId, 'in_progress', logs);
+          logs.push(logEntry(`Uploading large file: ${item.name} (${formatBytes(fileSize)})`));
+          await updateItemProgress(itemId, 'in_progress', logs, undefined, counters);
 
           const uploadSession = await target.post(
             `/drives/${targetDriveId}/root:${targetParentPath}/${item.name}:/createUploadSession`,
@@ -286,13 +307,18 @@ async function migrateDriveItemsRecursive(
         }
 
         counters.migrated++;
-        if (counters.migrated % 10 === 0) {
-          logs.push(logEntry(`Migrated ${counters.migrated} files so far...`));
-          await updateItemProgress(itemId, 'in_progress', logs);
-        }
+        counters.bytesMigrated += fileSize;
+
+        const pct = counters.bytesTotal > 0
+          ? ` (${Math.round(counters.bytesMigrated / counters.bytesTotal * 100)}%)`
+          : '';
+        logs.push(logEntry(`✓ ${item.name} — ${formatBytes(fileSize)} | Total: ${formatBytes(counters.bytesMigrated)} / ${formatBytes(counters.bytesTotal)}${pct}`));
+        await updateItemProgress(itemId, 'in_progress', logs, undefined, counters);
+
       } catch (err: any) {
         counters.failed++;
         logs.push(logEntry(`Failed to migrate file "${item.name}": ${err.message}`));
+        await updateItemProgress(itemId, 'in_progress', logs, undefined, counters);
       }
     }
   }
@@ -377,10 +403,12 @@ async function migrateOneDrive(
     const sourceDrive = await resolveUserDrive(source, sourceUserId, sourceUser);
     const targetDrive = await resolveUserDrive(target, targetUserId, targetUser);
 
-    logs.push(logEntry(`Source drive: ${sourceDrive.id}, Target drive: ${targetDrive.id}`));
-    await updateItemProgress(itemId, 'in_progress', logs);
+    const bytesTotal = sourceDrive.quota?.used || 0;
+    logs.push(logEntry(`Source drive: ${sourceDrive.id} | Size: ${formatBytes(bytesTotal)}`));
+    logs.push(logEntry(`Target drive: ${targetDrive.id}`));
+    await updateItemProgress(itemId, 'in_progress', logs, undefined, { bytesMigrated: 0, bytesTotal });
 
-    const counters = { migrated: 0, failed: 0, total: 0 };
+    const counters = { migrated: 0, failed: 0, total: 0, bytesMigrated: 0, bytesTotal };
 
     await migrateDriveItemsRecursive(
       source, target,
@@ -389,14 +417,15 @@ async function migrateOneDrive(
       itemId, logs, counters
     );
 
-    logs.push(logEntry(`OneDrive migration complete: ${counters.migrated} migrated, ${counters.failed} failed out of ${counters.total} total items`));
+    logs.push(logEntry(`OneDrive migration complete: ${counters.migrated} files migrated (${formatBytes(counters.bytesMigrated)}), ${counters.failed} failed out of ${counters.total} total items`));
 
+    const finalBytes = { bytesMigrated: counters.bytesMigrated, bytesTotal: counters.bytesTotal };
     if (counters.failed > 0 && counters.migrated === 0) {
-      await updateItemProgress(itemId, 'failed', logs, `All ${counters.failed} items failed`);
+      await updateItemProgress(itemId, 'failed', logs, `All ${counters.failed} items failed`, finalBytes);
     } else if (counters.failed > 0) {
-      await updateItemProgress(itemId, 'completed', logs, `${counters.failed} items failed`);
+      await updateItemProgress(itemId, 'completed', logs, `${counters.failed} items failed`, finalBytes);
     } else {
-      await updateItemProgress(itemId, 'completed', logs);
+      await updateItemProgress(itemId, 'completed', logs, undefined, finalBytes);
     }
   } catch (err: any) {
     logs.push(logEntry(`OneDrive migration failed: ${err.message}`));

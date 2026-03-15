@@ -1,4 +1,4 @@
-import { pgTable, text, serial, integer, timestamp, jsonb } from "drizzle-orm/pg-core";
+import { pgTable, text, serial, integer, bigint, timestamp, jsonb } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 import { users } from "./models/auth";
@@ -32,6 +32,9 @@ export const migrationItems = pgTable("migration_items", {
   status: text("status").default("pending").notNull(), // pending, in_progress, completed, failed
   errorDetails: text("error_details"),
   logs: jsonb("logs").$type<string[]>(), // Array of log strings
+  bytesTotal: bigint("bytes_total", { mode: "number" }),
+  bytesMigrated: bigint("bytes_migrated", { mode: "number" }),
+  progressPercent: integer("progress_percent"),
   updatedAt: timestamp("updated_at").defaultNow(),
 });
 

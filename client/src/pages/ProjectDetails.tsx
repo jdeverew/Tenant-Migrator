@@ -3,11 +3,12 @@ import { useProject, useProjectStats, useUpdateProject } from "@/hooks/use-proje
 import { useMigrationItems, useCreateMigrationItem, useUpdateMigrationItem, useDeleteMigrationItem } from "@/hooks/use-items";
 import { Sidebar } from "@/components/Sidebar";
 import { StatusBadge } from "@/components/StatusBadge";
-import { Loader2, ArrowLeft, Mail, Cloud, Users, Plus, Trash2, RotateCw, Eye, EyeOff, CheckCircle2, XCircle, Shield, ExternalLink, Play, PlayCircle, FileText, Globe } from "lucide-react";
+import { Loader2, ArrowLeft, Mail, Cloud, Users, Plus, Trash2, RotateCw, Eye, EyeOff, CheckCircle2, XCircle, Shield, ExternalLink, Play, PlayCircle, FileText, Globe, KeyRound } from "lucide-react";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip } from "recharts";
+import { Progress } from "@/components/ui/progress";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -30,6 +31,14 @@ const itemSchema = z.object({
 });
 
 type ItemFormData = z.infer<typeof itemSchema>;
+
+function formatBytes(bytes: number | null | undefined): string {
+  if (!bytes) return '0 B';
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+  return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GB`;
+}
 
 function ItemTypeIcon({ type }: { type: string }) {
   switch (type) {
@@ -388,15 +397,29 @@ export default function ProjectDetails() {
                           </td>
                           <td className="px-6 py-4 font-medium" data-testid={`text-source-${item.id}`}>{item.sourceIdentity}</td>
                           <td className="px-6 py-4 text-muted-foreground" data-testid={`text-target-${item.id}`}>{item.targetIdentity || "Auto-mapped"}</td>
-                          <td className="px-6 py-4">
+                          <td className="px-6 py-4 min-w-[200px]">
                             <div className="flex items-center gap-2">
                               <StatusBadge status={item.status} />
                               {item.status === 'in_progress' && <Loader2 className="w-3 h-3 animate-spin text-blue-500" />}
                             </div>
-                            {item.status === 'failed' && item.errorDetails && (
-                                <div className="text-xs text-red-500 mt-1 max-w-[200px] truncate" title={item.errorDetails} data-testid={`text-error-${item.id}`}>
-                                    {item.errorDetails}
+                            {item.status === 'in_progress' && item.bytesTotal != null && item.bytesTotal > 0 && (
+                              <div className="mt-2 space-y-1" data-testid={`progress-${item.id}`}>
+                                <Progress value={item.progressPercent ?? 0} className="h-1.5" />
+                                <div className="text-xs text-muted-foreground flex justify-between">
+                                  <span>{formatBytes(item.bytesMigrated)} / {formatBytes(item.bytesTotal)}</span>
+                                  <span className="font-medium text-blue-500">{item.progressPercent ?? 0}%</span>
                                 </div>
+                              </div>
+                            )}
+                            {(item.status === 'completed') && item.bytesMigrated != null && item.bytesMigrated > 0 && (
+                              <div className="text-xs text-muted-foreground mt-1" data-testid={`bytes-${item.id}`}>
+                                {formatBytes(item.bytesMigrated)} migrated
+                              </div>
+                            )}
+                            {item.status === 'failed' && item.errorDetails && (
+                              <div className="text-xs text-red-500 mt-1 max-w-[200px] truncate" title={item.errorDetails} data-testid={`text-error-${item.id}`}>
+                                {item.errorDetails}
+                              </div>
                             )}
                           </td>
                           <td className="px-6 py-4 text-right">
@@ -589,7 +612,7 @@ function TenantCredentialForm({
           </div>
         </div>
 
-        <div className="flex items-center gap-3 pt-2">
+        <div className="flex flex-wrap items-center gap-3 pt-2">
           <Button onClick={handleSave} disabled={isSaving} data-testid={`button-save-${tenantType}-credentials`}>
             {isSaving ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : null}
             Save Credentials
@@ -602,6 +625,19 @@ function TenantCredentialForm({
           >
             {isTesting ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : null}
             Test Connection
+          </Button>
+          <Button
+            variant="outline"
+            disabled={!tenantId || !localClientId}
+            onClick={() => {
+              const redirectUri = encodeURIComponent(window.location.origin);
+              const url = `https://login.microsoftonline.com/${tenantId}/adminconsent?client_id=${localClientId}&redirect_uri=${redirectUri}`;
+              window.open(url, '_blank');
+            }}
+            data-testid={`button-consent-${tenantType}`}
+          >
+            <KeyRound className="w-4 h-4 mr-2" />
+            Grant App Permissions
           </Button>
         </div>
 
