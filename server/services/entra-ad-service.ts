@@ -1,4 +1,6 @@
-import ldap from "ldapjs";
+// ldapjs is loaded lazily so the server starts even if the package is not yet installed.
+// Run `npm install` (or `npm install ldapjs`) to enable direct LDAP migration.
+import type ldapTypes from "ldapjs";
 import type { GraphClient } from "./graph-client";
 
 export interface EntraCloudOnlyUser {
@@ -26,7 +28,24 @@ export interface AdConnectionConfig {
   targetOu?: string | null;
 }
 
-// Discover cloud-only (non-synced) Entra ID users
+// ── Lazy loader ──────────────────────────────────────────────────────────────
+let _ldap: typeof ldapTypes | null = null;
+
+async function getLdap(): Promise<typeof ldapTypes> {
+  if (_ldap) return _ldap;
+  try {
+    const mod = await import("ldapjs");
+    _ldap = (mod.default ?? mod) as typeof ldapTypes;
+    return _ldap;
+  } catch {
+    throw new Error(
+      "The ldapjs package is not installed. Run `npm install` in your project folder and restart the server."
+    );
+  }
+}
+
+// ── Entra discovery ──────────────────────────────────────────────────────────
+
 export async function discoverCloudOnlyUsers(client: GraphClient): Promise<EntraCloudOnlyUser[]> {
   const users = await client.getAllPages<any>(
     `/users?$select=id,displayName,userPrincipalName,mail,givenName,surname,jobTitle,department,officeLocation,mobilePhone,accountEnabled,usageLocation,onPremisesSyncEnabled,onPremisesDistinguishedName,assignedLicenses&$top=999`
@@ -34,7 +53,6 @@ export async function discoverCloudOnlyUsers(client: GraphClient): Promise<Entra
 
   return users
     .filter((u: any) => {
-      // Cloud-only = no onPremisesSyncEnabled flag AND no onPremisesDistinguishedName
       if (u.userPrincipalName?.includes('#EXT#')) return false;
       const isSynced = u.onPremisesSyncEnabled === true || !!u.onPremisesDistinguishedName;
       return !isSynced;
@@ -55,8 +73,19 @@ export async function discoverCloudOnlyUsers(client: GraphClient): Promise<Entra
     }));
 }
 
-// Create an LDAP client and bind
-function createLdapClient(config: AdConnectionConfig): Promise<ldap.Client> {
+// ── LDAP helpers ─────────────────────────────────────────────────────────────
+
+function escapeLdapFilter(val: string): string {
+  return val
+    .replace(/\\/g, '\\5c')
+    .replace(/\*/g, '\\2a')
+    .replace(/\(/g, '\\28')
+    .replace(/\)/g, '\\29')
+    .replace(/\0/g, '\\00');
+}
+
+async function createLdapClient(config: AdConnectionConfig): Promise<ldapTypes.Client> {
+  const ldap = await getLdap();
   return new Promise((resolve, reject) => {
     const url = `${config.useSsl ? 'ldaps' : 'ldap'}://${config.dcHostname}:${config.ldapPort}`;
     const client = ldap.createClient({
@@ -66,7 +95,7 @@ function createLdapClient(config: AdConnectionConfig): Promise<ldap.Client> {
       connectTimeout: 10000,
     });
 
-    client.on('error', (err) => {
+    client.on('error', (err: Error) => {
       reject(new Error(`LDAP connection error: ${err.message}`));
     });
 
@@ -81,33 +110,36 @@ function createLdapClient(config: AdConnectionConfig): Promise<ldap.Client> {
   });
 }
 
-// Test LDAP connection
+// ── Public API ────────────────────────────────────────────────────────────────
+
 export async function testAdConnection(config: AdConnectionConfig): Promise<{ success: boolean; message: string }> {
-  let client: ldap.Client | null = null;
+  let client: ldapTypes.Client | null = null;
   try {
     client = await createLdapClient(config);
 
-    // Try a simple search to validate baseDn
     await new Promise<void>((resolve, reject) => {
       client!.search(
         config.baseDn,
         { scope: 'base', filter: '(objectClass=*)' },
         (err, res) => {
           if (err) return reject(new Error(`Base DN search failed: ${err.message}`));
-          res.on('error', (e) => reject(new Error(`Search error: ${e.message}`)));
-          res.on('end', (result) => {
+          res.on('error', (e: Error) => reject(new Error(`Search error: ${e.message}`)));
+          res.on('end', (result: any) => {
             if (result && result.status !== 0) {
               reject(new Error(`Base DN not found or not accessible (status ${result.status})`));
             } else {
               resolve();
             }
           });
-          res.on('searchEntry', () => {}); // consume results
+          res.on('searchEntry', () => {});
         }
       );
     });
 
-    return { success: true, message: `Connected successfully to ${config.dcHostname}:${config.ldapPort}. Base DN "${config.baseDn}" is accessible.` };
+    return {
+      success: true,
+      message: `Connected successfully to ${config.dcHostname}:${config.ldapPort}. Base DN "${config.baseDn}" is accessible.`,
+    };
   } catch (err: any) {
     return { success: false, message: err.message || 'Connection failed' };
   } finally {
@@ -115,13 +147,7 @@ export async function testAdConnection(config: AdConnectionConfig): Promise<{ su
   }
 }
 
-// Escape special characters in LDAP filter values
-function escapeLdapFilter(val: string): string {
-  return val.replace(/\\/g, '\\5c').replace(/\*/g, '\\2a').replace(/\(/g, '\\28').replace(/\)/g, '\\29').replace(/\0/g, '\\00');
-}
-
-// Check if user already exists in AD
-function checkUserExists(client: ldap.Client, baseDn: string, upn: string): Promise<boolean> {
+function checkUserExists(client: ldapTypes.Client, baseDn: string, upn: string): Promise<boolean> {
   return new Promise((resolve) => {
     client.search(
       baseDn,
@@ -137,7 +163,6 @@ function checkUserExists(client: ldap.Client, baseDn: string, upn: string): Prom
   });
 }
 
-// Encode a password for AD's unicodePwd attribute
 function encodePassword(password: string): Buffer {
   const quoted = `"${password}"`;
   const buf = Buffer.alloc(quoted.length * 2);
@@ -150,18 +175,18 @@ function encodePassword(password: string): Buffer {
 export interface AdMigrationResult {
   userPrincipalName: string;
   success: boolean;
-  created: boolean; // false = already existed
+  created: boolean;
   message: string;
   tempPassword?: string;
 }
 
-// Migrate a single Entra user to on-premises AD
 export async function migrateUserToAd(
   config: AdConnectionConfig,
   user: EntraCloudOnlyUser,
   targetUpn: string,
 ): Promise<AdMigrationResult> {
-  let client: ldap.Client | null = null;
+  const ldap = await getLdap();
+  let client: ldapTypes.Client | null = null;
   try {
     client = await createLdapClient(config);
 
@@ -169,7 +194,6 @@ export async function migrateUserToAd(
       .replace(/[^a-zA-Z0-9._-]/g, '')
       .substring(0, 20);
 
-    // Check if user already exists
     const exists = await checkUserExists(client, config.baseDn, targetUpn);
     if (exists) {
       client.destroy();
@@ -182,7 +206,7 @@ export async function migrateUserToAd(
     }
 
     const ouDn = config.targetOu || config.baseDn;
-    const cn = user.displayName || `${user.givenName || ''} ${user.surname || ''}`.trim() || samAccountName;
+    const cn = (user.displayName || `${user.givenName || ''} ${user.surname || ''}`.trim() || samAccountName);
     const userDn = `CN=${cn},${ouDn}`;
     const tempPassword = `Migr@tion${Math.random().toString(36).slice(-6).toUpperCase()}1!`;
 
@@ -191,14 +215,12 @@ export async function migrateUserToAd(
       cn,
       sAMAccountName: samAccountName,
       userPrincipalName: targetUpn,
-      // userAccountControl: 512 = normal enabled account, 514 = disabled
-      // We create disabled first (514), set password, then enable (512)
-      userAccountControl: '514',
+      userAccountControl: '514', // disabled initially
     };
 
     if (user.givenName) entry.givenName = user.givenName;
     if (user.surname) entry.sn = user.surname;
-    if (user.mail || user.mail) entry.mail = user.mail || targetUpn;
+    if (user.mail || targetUpn) entry.mail = user.mail || targetUpn;
     if (user.jobTitle) entry.title = user.jobTitle;
     if (user.department) entry.department = user.department;
     if (user.officeLocation) entry.physicalDeliveryOfficeName = user.officeLocation;
@@ -206,7 +228,7 @@ export async function migrateUserToAd(
     if (user.displayName) entry.displayName = user.displayName;
     entry.description = `Migrated from Entra ID (${user.userPrincipalName})`;
 
-    // Step 1: Add user object
+    // Step 1: Create user object
     await new Promise<void>((resolve, reject) => {
       client!.add(userDn, entry, (err) => {
         if (err) reject(new Error(`Failed to create AD user object: ${err.message}`));
@@ -214,34 +236,23 @@ export async function migrateUserToAd(
       });
     });
 
-    // Step 2: Set password (requires LDAPS on port 636 for production, or allow plain for test)
+    // Step 2: Set password (requires LDAPS in production)
     const passwordBuf = encodePassword(tempPassword);
-    await new Promise<void>((resolve, reject) => {
+    await new Promise<void>((resolve) => {
       const change = new ldap.Change({
         operation: 'replace',
         modification: new ldap.Attribute({ type: 'unicodePwd', values: [passwordBuf] }),
       });
-      client!.modify(userDn, change, (err) => {
-        if (err) {
-          // If password set fails (often happens over plain LDAP), we warn but don't fail
-          // The user can be enabled manually or via PS
-          resolve(); // Non-fatal
-        } else {
-          resolve();
-        }
-      });
+      client!.modify(userDn, change, () => resolve()); // non-fatal if fails over plain LDAP
     });
 
-    // Step 3: Enable account (userAccountControl = 512)
-    await new Promise<void>((resolve, reject) => {
+    // Step 3: Enable account
+    await new Promise<void>((resolve) => {
       const change = new ldap.Change({
         operation: 'replace',
         modification: new ldap.Attribute({ type: 'userAccountControl', values: ['512'] }),
       });
-      client!.modify(userDn, change, (err) => {
-        if (err) resolve(); // Non-fatal if already set
-        else resolve();
-      });
+      client!.modify(userDn, change, () => resolve());
     });
 
     // Step 4: Force password change at next logon
@@ -272,7 +283,8 @@ export async function migrateUserToAd(
   }
 }
 
-// Generate a PowerShell script for AD user creation
+// ── PowerShell export ─────────────────────────────────────────────────────────
+
 export function generatePowerShellScript(
   users: EntraCloudOnlyUser[],
   targetUpns: string[],
@@ -290,7 +302,6 @@ export function generatePowerShellScript(
     `# Requirements:`,
     `#   - Run on a Domain Controller or machine with RSAT (AD PowerShell module)`,
     `#   - Run as Domain Admin or account with 'Create User' rights in the target OU`,
-    `#   - Module: ActiveDirectory (Import-Module ActiveDirectory)`,
     ``,
     `Import-Module ActiveDirectory -ErrorAction Stop`,
     ``,
@@ -308,8 +319,8 @@ export function generatePowerShellScript(
 
     lines.push(`# --- User: ${user.displayName} (${user.userPrincipalName}) ---`);
     lines.push(`try {`);
-    lines.push(`  $existingUser = Get-ADUser -Filter { UserPrincipalName -eq '${targetUpn}' } -ErrorAction SilentlyContinue`);
-    lines.push(`  if ($existingUser) {`);
+    lines.push(`  $existing = Get-ADUser -Filter { UserPrincipalName -eq '${targetUpn}' } -ErrorAction SilentlyContinue`);
+    lines.push(`  if ($existing) {`);
     lines.push(`    Write-Host "SKIP: ${targetUpn} already exists" -ForegroundColor Yellow`);
     lines.push(`    $ErrorLog += "SKIP: ${targetUpn} already exists"`);
     lines.push(`  } else {`);
@@ -333,7 +344,7 @@ export function generatePowerShellScript(
     lines.push(`      Description       = 'Migrated from Entra ID (${user.userPrincipalName})'`);
     lines.push(`    }`);
     lines.push(`    New-ADUser @params`);
-    lines.push(`    Write-Host "CREATED: ${targetUpn} (Temp password: ${tempPass})" -ForegroundColor Green`);
+    lines.push(`    Write-Host "CREATED: ${targetUpn} | Temp password: ${tempPass}" -ForegroundColor Green`);
     lines.push(`    $SuccessLog += "CREATED: ${targetUpn} | TempPass: ${tempPass}"`);
     lines.push(`  }`);
     lines.push(`} catch {`);
@@ -344,18 +355,18 @@ export function generatePowerShellScript(
   });
 
   lines.push(`# --- Summary ---`);
-  lines.push(`Write-Host ""  `);
+  lines.push(`Write-Host ""`);
   lines.push(`Write-Host "=== Migration Complete ===" -ForegroundColor Cyan`);
-  lines.push(`Write-Host "Successful: $($SuccessLog.Count)"`);
-  lines.push(`Write-Host "Issues: $($ErrorLog.Count)"`);
+  lines.push(`Write-Host "Created: $($SuccessLog.Count)"`);
+  lines.push(`Write-Host "Skipped/Errors: $($ErrorLog.Count)"`);
   lines.push(`if ($SuccessLog.Count -gt 0) {`);
   lines.push(`  Write-Host ""`);
-  lines.push(`  Write-Host "--- Created Users and Temp Passwords ---" -ForegroundColor Green`);
+  lines.push(`  Write-Host "--- Created Users + Temp Passwords ---" -ForegroundColor Green`);
   lines.push(`  $SuccessLog | ForEach-Object { Write-Host $_ }`);
   lines.push(`}`);
   lines.push(`if ($ErrorLog.Count -gt 0) {`);
   lines.push(`  Write-Host ""`);
-  lines.push(`  Write-Host "--- Errors/Skipped ---" -ForegroundColor Yellow`);
+  lines.push(`  Write-Host "--- Issues ---" -ForegroundColor Yellow`);
   lines.push(`  $ErrorLog | ForEach-Object { Write-Host $_ }`);
   lines.push(`}`);
 
