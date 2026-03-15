@@ -299,30 +299,48 @@ async function migrateDriveItemsRecursive(
 }
 
 async function resolveUserDrive(client: GraphClient, userId: string, displayName: string): Promise<any> {
-  // Try the primary /drive endpoint first
+  const errors: string[] = [];
+
+  // Method 1: standard /users/{id}/drive
   try {
     const drive = await client.get(`/users/${userId}/drive`);
-    if (drive && drive.id) return drive;
+    if (drive?.id) return drive;
   } catch (e: any) {
-    if (!e.message.includes('404')) throw e;
+    errors.push(`Method 1 (/users/{id}/drive): ${e.message}`);
   }
 
-  // Fallback: list all drives and pick the business OneDrive
+  // Method 2: list all drives for the user
   try {
     const drivesRes = await client.get(`/users/${userId}/drives`);
     const drives: any[] = drivesRes.value || [];
     const biz = drives.find((d: any) => d.driveType === 'business') || drives[0];
     if (biz) return biz;
   } catch (e: any) {
-    // ignore, will throw below
+    errors.push(`Method 2 (/users/{id}/drives): ${e.message}`);
+  }
+
+  // Method 3: resolve via the user's mySite personal SharePoint URL
+  try {
+    const userProfile = await client.get(`/users/${userId}?$select=mySite`);
+    const mySite: string = userProfile?.mySite;
+    if (mySite) {
+      const url = new URL(mySite);
+      const hostname = url.hostname;
+      const path = url.pathname;
+      const drive = await client.get(`/sites/${hostname}:${path}:/drive`);
+      if (drive?.id) return drive;
+    }
+  } catch (e: any) {
+    errors.push(`Method 3 (mySite): ${e.message}`);
   }
 
   throw new Error(
-    `OneDrive not found for "${displayName}" (ID: ${userId}). ` +
-    `Please verify:\n` +
-    `1. The user has a Microsoft 365 license with OneDrive for Business\n` +
-    `2. The user has signed into OneDrive at least once (or an admin has provisioned it)\n` +
-    `3. The app registration has BOTH "Files.ReadWrite.All" AND "Sites.ReadWrite.All" as Application permissions with admin consent granted`
+    `Could not access OneDrive for "${displayName}" after trying 3 methods.\n` +
+    `Diagnostic log:\n${errors.join('\n')}\n\n` +
+    `Most common fixes:\n` +
+    `- Run this PowerShell as a Global Admin to force-provision the drive:\n` +
+    `  Request-SPOPersonalSite -UserEmails @("${displayName}")\n` +
+    `- Or have the user sign into https://onedrive.com once to initialise their drive.`
   );
 }
 
