@@ -311,9 +311,29 @@ async function migrateOneDrive(
   await updateItemProgress(itemId, 'in_progress', logs);
 
   try {
+    logs.push(logEntry("Resolving source user..."));
+    const sourceUserObj = await source.get(`/users/${sourceUser}`).catch(() => null);
+    if (!sourceUserObj) {
+      throw new Error(`Source user "${sourceUser}" not found. Check the email address is correct and the app has User.Read.All permission.`);
+    }
+    const sourceUserId = sourceUserObj.id;
+
+    logs.push(logEntry("Resolving target user..."));
+    const targetUserObj = await target.get(`/users/${targetUser}`).catch(() => null);
+    if (!targetUserObj) {
+      throw new Error(`Target user "${targetUser}" not found. Check the email address is correct and the app has User.Read.All permission.`);
+    }
+    const targetUserId = targetUserObj.id;
+
+    logs.push(logEntry(`Source user ID: ${sourceUserId}, Target user ID: ${targetUserId}`));
     logs.push(logEntry("Reading source user's OneDrive..."));
-    const sourceDrive = await source.get(`/users/${sourceUser}/drive`);
-    const targetDrive = await target.get(`/users/${targetUser}/drive`);
+
+    const sourceDrive = await source.get(`/users/${sourceUserId}/drive`).catch((err: any) => {
+      throw new Error(`Cannot access source OneDrive for "${sourceUser}". Ensure the user has a OneDrive license and the app has Files.ReadWrite.All permission. Details: ${err.message}`);
+    });
+    const targetDrive = await target.get(`/users/${targetUserId}/drive`).catch((err: any) => {
+      throw new Error(`Cannot access target OneDrive for "${targetUser}". Ensure the user has a OneDrive license and the app has Files.ReadWrite.All permission. Details: ${err.message}`);
+    });
 
     logs.push(logEntry(`Source drive: ${sourceDrive.id}, Target drive: ${targetDrive.id}`));
     await updateItemProgress(itemId, 'in_progress', logs);
