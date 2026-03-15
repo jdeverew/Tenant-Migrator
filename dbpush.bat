@@ -1,2 +1,2 @@
 @echo off
-npx drizzle-kit push
+node dbpush.js
