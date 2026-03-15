@@ -584,46 +584,5 @@ export async function registerRoutes(
     res.json({ url });
   });
 
-  // Seed data if empty
-  await seedDatabase();
-
   return httpServer;
-}
-
-async function seedDatabase() {
-  const projects = await storage.getProjects();
-  if (projects.length === 0) {
-    const p1 = await storage.createProject({
-      name: "Acme Corp to Contoso Migration",
-      sourceTenantId: "acme-corp-id-123",
-      targetTenantId: "contoso-id-456",
-      status: "active",
-      description: "Migrating 50 users from Acme to Contoso."
-    });
-
-    await storage.createItem({
-      projectId: p1.id,
-      sourceIdentity: "john.doe@acme.com",
-      targetIdentity: "john.doe@contoso.com",
-      itemType: "mailbox",
-      status: "completed"
-    });
-    
-    await storage.createItem({
-      projectId: p1.id,
-      sourceIdentity: "jane.smith@acme.com",
-      targetIdentity: "jane.smith@contoso.com",
-      itemType: "mailbox",
-      status: "in_progress"
-    });
-
-    await storage.createItem({
-      projectId: p1.id,
-      sourceIdentity: "bob.jones@acme.com",
-      targetIdentity: "bob.jones@contoso.com",
-      itemType: "onedrive",
-      status: "failed",
-      errorDetails: "Permission denied on source drive"
-    });
-  }
 }
