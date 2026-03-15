@@ -1,90 +1,92 @@
-# Running Locally
+# Running Locally on Windows
 
-## Prerequisites
+## Step 1: Install These Two Programs
 
-Install these before anything else:
-
-1. **Node.js 20+** — https://nodejs.org/en/download
-2. **PostgreSQL 15+** — https://www.postgresql.org/download
-
----
-
-## Step 1: Download the Code
-
-In Replit, click the three-dot menu (⋮) in the Files panel and choose **Download as ZIP**. Extract the ZIP to a folder on your computer.
+1. **Node.js** — https://nodejs.org → click the big **"LTS"** button → install it like any normal program
+2. **PostgreSQL** — https://www.postgresql.org/download → click Windows → download and install
+   - During install it will ask you to set a password — **write it down**, you need it later
 
 ---
 
-## Step 2: Create a PostgreSQL Database
+## Step 2: Create the Database
 
-Open a terminal and run:
+After PostgreSQL is installed, open **pgAdmin** from the Start menu, then:
 
-```bash
-psql -U postgres
-CREATE DATABASE m365migration;
-\q
+1. Expand **Servers** → **PostgreSQL** in the left panel
+2. Right-click **Databases** → **Create** → **Database**
+3. Type `m365migration` as the name → click **Save**
+
+---
+
+## Step 3: Create the `.env` File
+
+1. Open your project folder (the unzipped folder)
+2. Right-click inside it → **New** → **Text Document**
+3. Name it `.env` — make sure it is NOT called `.env.txt`
+4. Open it with Notepad and paste this in:
+
 ```
-
----
-
-## Step 3: Create a `.env` File
-
-In the root of the project folder, create a file called `.env` with the following contents:
-
-```env
-DATABASE_URL=postgresql://postgres:yourpassword@localhost:5432/m365migration
-SESSION_SECRET=any-long-random-string-you-make-up
-
-# Login credentials for the app (defaults to admin / admin if not set)
+DATABASE_URL=postgresql://postgres:YOURPASSWORD@localhost:5432/m365migration
+SESSION_SECRET=anylongrandomtextyouwant
 ADMIN_USERNAME=admin
 ADMIN_PASSWORD=admin
 ```
 
-Replace `yourpassword` with your actual PostgreSQL password.
+5. Replace `YOURPASSWORD` with the password you chose during PostgreSQL install
+6. Save the file
 
 ---
 
-## Step 4: Install Dependencies and Set Up the Database
+## Step 4: Install Dependencies
 
-Open a terminal in the project folder and run these commands one at a time:
+1. Open your project folder in File Explorer
+2. Click the address bar at the top → type `cmd` → press Enter
+3. In the Command Prompt window that opens, run:
 
-```bash
+```
 npm install
-npm run db:push
+```
+
+Wait for it to finish.
+
+---
+
+## Step 5: Set Up the Database Tables
+
+In the same Command Prompt window, run:
+
+```
+dbpush.bat
 ```
 
 ---
 
-## Step 5: Start the App
+## Step 6: Start the App
 
-```bash
-npm run dev
+In the same Command Prompt window, run:
+
 ```
-
-The app will be available at: **http://localhost:5000**
+start.bat
+```
 
 ---
 
-## Logging In
+## Step 7: Open the App
 
-Use the credentials you set in the `.env` file. If you didn't change them, the defaults are:
+Go to **http://localhost:5000** in your browser.
 
+Log in with:
 - **Username:** `admin`
 - **Password:** `admin`
 
----
-
-## Changing Your Password
-
-You can set a stronger password via the `ADMIN_PASSWORD` environment variable in your `.env` file. Restart the app after changing it.
+(or whatever you set in the `.env` file)
 
 ---
 
-## Environment Variables Reference
+## Stopping the App
 
-| Variable | Required | Description |
-|---|---|---|
-| `DATABASE_URL` | Yes | PostgreSQL connection string |
-| `SESSION_SECRET` | Yes | Secret used to sign session cookies (any long random string) |
-| `ADMIN_USERNAME` | No | Login username (default: `admin`) |
-| `ADMIN_PASSWORD` | No | Login password (default: `admin`) |
+Press **Ctrl + C** in the Command Prompt window.
+
+## Starting Again Later
+
+Just open Command Prompt in the project folder and run `start.bat` again.
