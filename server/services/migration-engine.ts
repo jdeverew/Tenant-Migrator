@@ -1134,12 +1134,39 @@ async function migrateTeam(
   }
 }
 
-// ── Helper: resolve a user in a tenant by UPN or email, return their object ID ──
+// ── Helper: resolve a user in a tenant by UPN, email, or alias (cross-tenant aware) ──
 async function resolveUserInTenant(client: GraphClient, upn: string): Promise<string | null> {
+  if (!upn) return null;
+
+  // 1. Try exact UPN / object ID lookup
   try {
     const u = await client.get(`/users/${encodeURIComponent(upn)}?$select=id`);
-    return u?.id || null;
-  } catch { return null; }
+    if (u?.id) return u.id;
+  } catch { }
+
+  // 2. Try filter by mail address (handles alias@differentdomain.com)
+  try {
+    const res = await client.get(`/users?$filter=mail eq '${upn.replace(/'/g, "''")}'&$select=id&$top=1`);
+    if (res.value?.length) return res.value[0].id;
+  } catch { }
+
+  // 3. Try filter by mailNickname (prefix before @) — key for cross-tenant migrations
+  //    e.g. "john.smith@sourcetenant.com" → find "john.smith" in target
+  const alias = upn.split('@')[0];
+  if (alias) {
+    try {
+      const res = await client.get(`/users?$filter=mailNickname eq '${alias.replace(/'/g, "''")}'&$select=id&$top=1`);
+      if (res.value?.length) return res.value[0].id;
+    } catch { }
+
+    // 4. Also try proxyAddresses contains the alias (catches smtp: aliases)
+    try {
+      const res = await client.get(`/users?$filter=startsWith(userPrincipalName,'${alias.replace(/'/g, "''")}@')&$select=id&$top=1`);
+      if (res.value?.length) return res.value[0].id;
+    } catch { }
+  }
+
+  return null;
 }
 
 // ── Helper: resolve a group in a tenant by mail/displayName, return group object ──
@@ -1181,10 +1208,13 @@ async function migrateDistributionGroup(
     const owners  = await source.getAllPages<any>(`/groups/${sourceGroup.id}/owners?$select=id,userPrincipalName,mail,displayName`);
     logs.push(logEntry(`Source: ${members.length} members, ${owners.length} owners`));
 
-    // Determine target mail alias
+    // Determine target name and mail alias
+    // If targetIdentity looks like an email, use its alias; otherwise use the source group's mailNickname
     const targetName = targetIdentity || sourceGroup.displayName;
-    const targetNickname = (targetIdentity?.includes('@') ? targetIdentity.split('@')[0] : targetIdentity || sourceGroup.mailNickname || '')
-      .replace(/[^a-zA-Z0-9]/g, '').slice(0, 59) || 'dl' + Date.now();
+    const targetNickname = (targetIdentity?.includes('@')
+      ? targetIdentity.split('@')[0]
+      : sourceGroup.mailNickname || targetIdentity || '')
+      .replace(/[^a-zA-Z0-9]/g, '').slice(0, 59) || `dl${Date.now()}`;
 
     // Create or find distribution group in target
     let targetGroup = await resolveGroupInTenant(target, targetName);
@@ -1207,19 +1237,23 @@ async function migrateDistributionGroup(
       logs.push(logEntry(`Distribution group already exists in target (ID: ${targetGroup.id})`));
     }
 
-    // Add owners first (must be users)
+    // Add owners first (must be users in target tenant)
     let ownersMigrated = 0;
     for (const owner of owners) {
       const email = owner.userPrincipalName || owner.mail;
       if (!email) continue;
       const targetUserId = await resolveUserInTenant(target, email);
-      if (!targetUserId) { logs.push(logEntry(`Owner ${email} not found in target — skipping`)); continue; }
+      if (!targetUserId) {
+        logs.push(logEntry(`  Owner not found in target: ${email} (alias '${email.split('@')[0]}' — ensure user exists in target tenant)`));
+        continue;
+      }
       try {
         await target.post(`/groups/${targetGroup.id}/owners/$ref`, {
           '@odata.id': `https://graph.microsoft.com/v1.0/users/${targetUserId}`,
         });
+        logs.push(logEntry(`  ✓ Owner added: ${email}`));
         ownersMigrated++;
-      } catch { /* may already be owner */ }
+      } catch (e: any) { logs.push(logEntry(`  Owner already exists or failed: ${email}`)); }
     }
 
     // Add members
@@ -1228,17 +1262,24 @@ async function migrateDistributionGroup(
       const email = member.userPrincipalName || member.mail;
       if (!email) continue;
       const targetUserId = await resolveUserInTenant(target, email);
-      if (!targetUserId) { logs.push(logEntry(`Member ${email} not found in target — skipping`)); continue; }
+      if (!targetUserId) {
+        logs.push(logEntry(`  Member not found in target: ${email} (alias '${email.split('@')[0]}' — ensure user exists in target tenant)`));
+        continue;
+      }
       try {
         await target.post(`/groups/${targetGroup.id}/members/$ref`, {
           '@odata.id': `https://graph.microsoft.com/v1.0/users/${targetUserId}`,
         });
+        logs.push(logEntry(`  ✓ Member added: ${email}`));
         membersMigrated++;
-      } catch { /* may already be member */ }
+      } catch (e: any) { logs.push(logEntry(`  Member already exists or failed: ${email}`)); }
     }
 
     logs.push(logEntry(`✓ Owners added: ${ownersMigrated}/${owners.length}`));
     logs.push(logEntry(`✓ Members added: ${membersMigrated}/${members.length}`));
+    if (membersMigrated < members.length) {
+      logs.push(logEntry(`  Note: ${members.length - membersMigrated} member(s) not found in target. Members must exist in target tenant. Cross-tenant UPNs are matched by alias (prefix before @).`));
+    }
     logs.push(logEntry('Distribution group migration complete'));
     await updateItemProgress(itemId, 'completed', logs);
   } catch (err: any) {
@@ -1345,8 +1386,10 @@ async function migrateM365Group(
     logs.push(logEntry(`Source: ${members.length} members, ${owners.length} owners`));
 
     const targetName     = targetIdentity || sourceGroup.displayName;
-    const targetNickname = (targetIdentity?.includes('@') ? targetIdentity.split('@')[0] : targetIdentity || sourceGroup.mailNickname || '')
-      .replace(/[^a-zA-Z0-9]/g, '').slice(0, 59) || 'm365g' + Date.now();
+    const targetNickname = (targetIdentity?.includes('@')
+      ? targetIdentity.split('@')[0]
+      : sourceGroup.mailNickname || targetIdentity || '')
+      .replace(/[^a-zA-Z0-9]/g, '').slice(0, 59) || `m365g${Date.now()}`;
 
     // Create or find group in target
     let targetGroup = await resolveGroupInTenant(target, targetName);
@@ -1375,13 +1418,17 @@ async function migrateM365Group(
       const email = owner.userPrincipalName || owner.mail;
       if (!email) continue;
       const targetUserId = await resolveUserInTenant(target, email);
-      if (!targetUserId) { logs.push(logEntry(`Owner ${email} not found in target — skipping`)); continue; }
+      if (!targetUserId) {
+        logs.push(logEntry(`  Owner not found in target: ${email} (alias '${email.split('@')[0]}' — ensure user exists in target tenant)`));
+        continue;
+      }
       try {
         await target.post(`/groups/${targetGroup.id}/owners/$ref`, {
           '@odata.id': `https://graph.microsoft.com/v1.0/users/${targetUserId}`,
         });
+        logs.push(logEntry(`  ✓ Owner added: ${email}`));
         ownersMigrated++;
-      } catch { /* may already be owner */ }
+      } catch (e: any) { logs.push(logEntry(`  Owner already exists or failed: ${email}`)); }
     }
 
     // Add members
@@ -1390,17 +1437,24 @@ async function migrateM365Group(
       const email = member.userPrincipalName || member.mail;
       if (!email) continue;
       const targetUserId = await resolveUserInTenant(target, email);
-      if (!targetUserId) { logs.push(logEntry(`Member ${email} not found in target — skipping`)); continue; }
+      if (!targetUserId) {
+        logs.push(logEntry(`  Member not found in target: ${email} (alias '${email.split('@')[0]}' — ensure user exists in target tenant)`));
+        continue;
+      }
       try {
         await target.post(`/groups/${targetGroup.id}/members/$ref`, {
           '@odata.id': `https://graph.microsoft.com/v1.0/users/${targetUserId}`,
         });
+        logs.push(logEntry(`  ✓ Member added: ${email}`));
         membersMigrated++;
-      } catch { /* may already be member */ }
+      } catch (e: any) { logs.push(logEntry(`  Member already exists or failed: ${email}`)); }
     }
 
     logs.push(logEntry(`✓ Owners added: ${ownersMigrated}/${owners.length}`));
     logs.push(logEntry(`✓ Members added: ${membersMigrated}/${members.length}`));
+    if (membersMigrated < members.length) {
+      logs.push(logEntry(`  Note: ${members.length - membersMigrated} member(s) not found in target. Members must exist in target tenant. Cross-tenant UPNs are matched by alias (prefix before @).`));
+    }
     logs.push(logEntry('✓ M365 Group migration complete'));
     await updateItemProgress(itemId, 'completed', logs);
   } catch (err: any) {

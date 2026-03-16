@@ -184,16 +184,17 @@ export interface DiscoveredSharedMailbox {
 
 export async function discoverDistributionGroups(client: GraphClient): Promise<DiscoveredGroup[]> {
   // Mail-enabled, non-security, non-Unified groups = classic distribution lists
+  // groupTypes MUST be in $select so we can filter out M365 Unified groups
   const groups = await client.getAllPages<any>(
-    `/groups?$filter=mailEnabled eq true and securityEnabled eq false&$select=id,displayName,mail,mailNickname,description,visibility&$top=100`
+    `/groups?$filter=mailEnabled eq true and securityEnabled eq false&$select=id,displayName,mail,mailNickname,description,visibility,groupTypes&$top=100`
   );
   const results: DiscoveredGroup[] = [];
   for (const g of groups) {
-    // Exclude M365 Unified groups (they are returned by the same filter sometimes)
-    if ((g.groupTypes || []).includes('Unified')) continue;
+    // Exclude M365 Unified groups (mailEnabled + non-security but groupTypes contains 'Unified')
+    if (Array.isArray(g.groupTypes) && g.groupTypes.includes('Unified')) continue;
     let memberCount = 0, ownerCount = 0;
-    try { memberCount = (await client.get(`/groups/${g.id}/members?$select=id&$top=1`))['@odata.count'] || 0; } catch { }
-    try { ownerCount = (await client.get(`/groups/${g.id}/owners?$select=id&$top=1`))['@odata.count'] || 0; } catch { }
+    try { const r = await client.get(`/groups/${g.id}/members?$select=id&$top=999`); memberCount = (r.value || []).length; } catch { }
+    try { const r = await client.get(`/groups/${g.id}/owners?$select=id&$top=999`); ownerCount = (r.value || []).length; } catch { }
     results.push({ id: g.id, displayName: g.displayName, mail: g.mail || null, mailNickname: g.mailNickname || null, description: g.description || null, visibility: g.visibility || null, memberCount, ownerCount });
   }
   return results;
@@ -226,13 +227,13 @@ export async function discoverSharedMailboxes(client: GraphClient): Promise<Disc
 
 export async function discoverM365Groups(client: GraphClient): Promise<DiscoveredGroup[]> {
   const groups = await client.getAllPages<any>(
-    `/groups?$filter=groupTypes/any(c:c eq 'Unified')&$select=id,displayName,mail,mailNickname,description,visibility&$top=100`
+    `/groups?$filter=groupTypes/any(c:c eq 'Unified')&$select=id,displayName,mail,mailNickname,description,visibility,groupTypes&$top=100`
   );
   const results: DiscoveredGroup[] = [];
   for (const g of groups) {
     let memberCount = 0, ownerCount = 0;
-    try { memberCount = (await client.get(`/groups/${g.id}/members?$select=id&$top=1`))['@odata.count'] || 0; } catch { }
-    try { ownerCount = (await client.get(`/groups/${g.id}/owners?$select=id&$top=1`))['@odata.count'] || 0; } catch { }
+    try { const r = await client.get(`/groups/${g.id}/members?$select=id&$top=999`); memberCount = (r.value || []).length; } catch { }
+    try { const r = await client.get(`/groups/${g.id}/owners?$select=id&$top=999`); ownerCount = (r.value || []).length; } catch { }
     results.push({ id: g.id, displayName: g.displayName, mail: g.mail || null, mailNickname: g.mailNickname || null, description: g.description || null, visibility: g.visibility || 'Private', memberCount, ownerCount });
   }
   return results;
