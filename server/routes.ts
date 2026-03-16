@@ -733,5 +733,58 @@ export async function registerRoutes(
     res.json({ url });
   });
 
+  // === Continuous Sync Routes ===
+
+  // GET /api/projects/:id/sync-status  — returns sync settings + per-item sync state
+  app.get('/api/projects/:id/sync-status', requireAuth, async (req, res) => {
+    const userId = getSessionUserId(req);
+    const project = await storage.getProject(Number(req.params.id), userId);
+    if (!project) return res.status(404).json({ message: 'Project not found' });
+    const items = await storage.getItems(project.id);
+    const syncableTypes = ['mailbox', 'onedrive', 'sharepoint', 'sharedmailbox'];
+    const syncableItems = items.filter(i => i.status === 'completed' && syncableTypes.includes(i.itemType));
+    return res.json({
+      syncEnabled: project.syncEnabled ?? false,
+      syncIntervalMinutes: project.syncIntervalMinutes ?? 60,
+      completedItems: syncableItems.length,
+      items: syncableItems.map(i => ({
+        id: i.id,
+        itemType: i.itemType,
+        sourceIdentity: i.sourceIdentity,
+        targetIdentity: i.targetIdentity,
+        lastSyncedAt: i.lastSyncedAt,
+        nextSyncAt: i.nextSyncAt,
+      })),
+    });
+  });
+
+  // PATCH /api/projects/:id/sync-settings — enable/disable sync and set interval
+  app.patch('/api/projects/:id/sync-settings', requireAuth, async (req, res) => {
+    const userId = getSessionUserId(req);
+    const project = await storage.getProject(Number(req.params.id), userId);
+    if (!project) return res.status(404).json({ message: 'Project not found' });
+    const { syncEnabled, syncIntervalMinutes } = req.body as {
+      syncEnabled?: boolean;
+      syncIntervalMinutes?: number;
+    };
+    const updates: Record<string, any> = {};
+    if (syncEnabled !== undefined) updates.syncEnabled = syncEnabled;
+    if (syncIntervalMinutes !== undefined) updates.syncIntervalMinutes = syncIntervalMinutes;
+    const updated = await storage.updateProject(project.id, updates, userId);
+    return res.json({ syncEnabled: updated.syncEnabled, syncIntervalMinutes: updated.syncIntervalMinutes });
+  });
+
+  // POST /api/projects/:id/sync-now — trigger an immediate sync for this project
+  app.post('/api/projects/:id/sync-now', requireAuth, async (req, res) => {
+    const userId = getSessionUserId(req);
+    const project = await storage.getProject(Number(req.params.id), userId);
+    if (!project) return res.status(404).json({ message: 'Project not found' });
+    // Import here to avoid circular deps at top-level
+    const { runProjectSync } = await import('./services/sync-engine');
+    // Run async — return immediately
+    runProjectSync(project.id).catch(e => console.error('[sync-now] error:', e.message));
+    return res.json({ message: 'Sync started — check item logs for progress' });
+  });
+
   return httpServer;
 }

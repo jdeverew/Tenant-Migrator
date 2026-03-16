@@ -12,6 +12,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/u
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Switch } from "@/components/ui/switch";
 import { useForm, Controller } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
@@ -89,6 +90,60 @@ export default function ProjectDetails() {
   const [selectedServiceItems, setSelectedServiceItems] = useState<Set<number>>(new Set());
   const [isDeletingSelected, setIsDeletingSelected] = useState(false);
   const { toast } = useToast();
+
+  // Continuous sync
+  const { data: syncStatus, refetch: refetchSyncStatus } = useQuery<{
+    syncEnabled: boolean;
+    syncIntervalMinutes: number;
+    completedItems: number;
+    items: { id: number; itemType: string; sourceIdentity: string; targetIdentity: string | null; lastSyncedAt: string | null; nextSyncAt: string | null }[];
+  }>({ queryKey: ['/api/projects', id, 'sync-status'], queryFn: async () => {
+    const res = await fetch(`/api/projects/${id}/sync-status`, { credentials: 'include' });
+    if (!res.ok) throw new Error('Failed to load sync status');
+    return res.json();
+  }, enabled: !!id });
+
+  const [syncSaving, setSyncSaving] = useState(false);
+  const [syncRunning, setSyncRunning] = useState(false);
+
+  const handleToggleSync = async (enabled: boolean) => {
+    setSyncSaving(true);
+    try {
+      await apiRequest('PATCH', `/api/projects/${id}/sync-settings`, { syncEnabled: enabled });
+      await refetchSyncStatus();
+      queryClient.invalidateQueries({ queryKey: ['/api/projects', id] });
+      toast({ title: enabled ? 'Continuous sync enabled' : 'Continuous sync disabled', description: enabled ? 'New emails and files will be automatically synced.' : 'Automatic sync has been paused.' });
+    } catch (e: any) {
+      toast({ title: 'Error', description: e.message, variant: 'destructive' });
+    } finally {
+      setSyncSaving(false);
+    }
+  };
+
+  const handleSyncIntervalChange = async (minutes: string) => {
+    setSyncSaving(true);
+    try {
+      await apiRequest('PATCH', `/api/projects/${id}/sync-settings`, { syncIntervalMinutes: Number(minutes) });
+      await refetchSyncStatus();
+    } catch (e: any) {
+      toast({ title: 'Error', description: e.message, variant: 'destructive' });
+    } finally {
+      setSyncSaving(false);
+    }
+  };
+
+  const handleSyncNow = async () => {
+    setSyncRunning(true);
+    try {
+      await apiRequest('POST', `/api/projects/${id}/sync-now`, {});
+      toast({ title: 'Sync triggered', description: 'Catching up on new emails and files — check item logs for details.' });
+      setTimeout(() => refetchSyncStatus(), 5000);
+    } catch (e: any) {
+      toast({ title: 'Error', description: e.message, variant: 'destructive' });
+    } finally {
+      setSyncRunning(false);
+    }
+  };
 
   const handleDeleteSelected = async (svcItemIds: number[]) => {
     const toDelete = svcItemIds.filter(id => selectedServiceItems.has(id));
@@ -403,6 +458,106 @@ export default function ProjectDetails() {
                       </Card>
                     ))}
                   </div>
+
+                  {/* Continuous Sync Panel */}
+                  <Card className="shadow-sm">
+                    <CardHeader className="pb-3">
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-2">
+                          <RefreshCw className="w-4 h-4 text-primary" />
+                          <CardTitle className="text-base">Continuous Sync</CardTitle>
+                          {syncStatus?.syncEnabled && (
+                            <span className="inline-flex items-center gap-1 px-2 py-0.5 text-xs font-medium rounded-full bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400">
+                              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                              Active
+                            </span>
+                          )}
+                        </div>
+                        <div className="flex items-center gap-3">
+                          {syncSaving && <Loader2 className="w-4 h-4 animate-spin text-muted-foreground" />}
+                          <Switch
+                            checked={syncStatus?.syncEnabled ?? false}
+                            onCheckedChange={handleToggleSync}
+                            disabled={syncSaving}
+                            data-testid="switch-sync-enabled"
+                          />
+                        </div>
+                      </div>
+                      <CardDescription className="text-xs mt-1">
+                        Automatically detect new emails, files, and changes in the source tenant and replicate them to the target — no manual runs needed.
+                      </CardDescription>
+                    </CardHeader>
+                    <CardContent className="space-y-4">
+                      <div className="flex flex-wrap items-center gap-4">
+                        <div className="flex items-center gap-2">
+                          <Label className="text-sm text-muted-foreground whitespace-nowrap">Check every</Label>
+                          <Select
+                            value={String(syncStatus?.syncIntervalMinutes ?? 60)}
+                            onValueChange={handleSyncIntervalChange}
+                            disabled={syncSaving}
+                          >
+                            <SelectTrigger className="w-36 h-8 text-sm" data-testid="select-sync-interval">
+                              <SelectValue />
+                            </SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="15">15 minutes</SelectItem>
+                              <SelectItem value="30">30 minutes</SelectItem>
+                              <SelectItem value="60">1 hour</SelectItem>
+                              <SelectItem value="240">4 hours</SelectItem>
+                              <SelectItem value="720">12 hours</SelectItem>
+                              <SelectItem value="1440">24 hours</SelectItem>
+                            </SelectContent>
+                          </Select>
+                        </div>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={handleSyncNow}
+                          disabled={syncRunning || !syncStatus?.completedItems}
+                          data-testid="button-sync-now"
+                        >
+                          {syncRunning
+                            ? <><Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" /> Syncing…</>
+                            : <><RefreshCw className="w-3.5 h-3.5 mr-1.5" /> Sync now</>
+                          }
+                        </Button>
+                      </div>
+
+                      {/* Per-item sync state */}
+                      {syncStatus && syncStatus.items.length > 0 ? (
+                        <div className="space-y-1.5">
+                          <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Syncing {syncStatus.items.length} completed item(s)</p>
+                          <div className="rounded-lg border border-border divide-y divide-border overflow-hidden">
+                            {syncStatus.items.map(item => (
+                              <div key={item.id} className="flex items-center gap-3 px-3 py-2 text-sm bg-background hover:bg-muted/30">
+                                <ItemTypeIcon type={item.itemType} />
+                                <span className="flex-1 truncate font-medium">{item.sourceIdentity}</span>
+                                {item.targetIdentity && item.targetIdentity !== item.sourceIdentity && (
+                                  <span className="text-xs text-muted-foreground truncate max-w-[140px]">→ {item.targetIdentity}</span>
+                                )}
+                                <div className="text-right shrink-0">
+                                  {item.lastSyncedAt ? (
+                                    <p className="text-xs text-muted-foreground">Last synced {format(new Date(item.lastSyncedAt), 'MMM d, HH:mm')}</p>
+                                  ) : (
+                                    <p className="text-xs text-muted-foreground italic">Not yet synced</p>
+                                  )}
+                                  {item.nextSyncAt && syncStatus.syncEnabled && (
+                                    <p className="text-xs text-emerald-600 dark:text-emerald-400">Next: {format(new Date(item.nextSyncAt), 'MMM d, HH:mm')}</p>
+                                  )}
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      ) : (
+                        <p className="text-xs text-muted-foreground italic">
+                          {syncStatus?.completedItems === 0
+                            ? 'Complete initial migrations first — sync only runs on finished items (mailbox, OneDrive, SharePoint).'
+                            : 'No syncable completed items yet.'}
+                        </p>
+                      )}
+                    </CardContent>
+                  </Card>
 
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                     {/* Service breakdown */}

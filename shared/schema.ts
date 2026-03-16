@@ -31,6 +31,9 @@ export const migrationProjects = pgTable("migration_projects", {
   // Persisted consent tracking — JSON arrays of ServiceKey strings
   sourceConsentedServices: text("source_consented_services"),
   targetConsentedServices: text("target_consented_services"),
+  // Continuous sync settings
+  syncEnabled: boolean("sync_enabled").default(false),
+  syncIntervalMinutes: integer("sync_interval_minutes").default(60),
 });
 
 // === MIGRATION ITEMS (Users/Resources to migrate) ===
@@ -48,6 +51,10 @@ export const migrationItems = pgTable("migration_items", {
   progressPercent: integer("progress_percent"),
   updatedAt: timestamp("updated_at").defaultNow(),
   options: jsonb("options").$type<Record<string, any>>(),
+  // Continuous sync state
+  deltaToken: text("delta_token"),
+  lastSyncedAt: timestamp("last_synced_at"),
+  nextSyncAt: timestamp("next_sync_at"),
 });
 
 // === MAPPING RULES ===
