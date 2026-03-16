@@ -1337,6 +1337,7 @@ async function migrateDistributionGroup(
     logs.push(logEntry('Distribution group migration complete'));
     await updateItemProgress(itemId, 'completed', logs);
   } catch (err: any) {
+    console.error(`[migration] distributiongroup ${itemId} FAILED:`, err.message);
     logs.push(logEntry(`Distribution group migration failed: ${err.message}`));
     await updateItemProgress(itemId, 'failed', logs, err.message);
   }
@@ -1350,45 +1351,72 @@ async function migrateSharedMailbox(
   itemId: number
 ): Promise<void> {
   const logs: string[] = [];
-  logs.push(logEntry(`Starting shared mailbox migration: ${sourceIdentity} → ${targetIdentity || sourceIdentity}`));
+  logs.push(logEntry(`Starting shared mailbox migration: ${sourceIdentity} → ${targetIdentity || '(will derive from target domain)'}`));
+  console.log(`[migration] sharedmailbox ${itemId}: starting — sourceIdentity="${sourceIdentity}" targetIdentity="${targetIdentity}"`);
   await updateItemProgress(itemId, 'in_progress', logs);
 
   try {
-    // Resolve source mailbox (shared mailboxes are user objects in Graph)
+    // ── Step 1: resolve source mailbox (shared mailboxes are user objects in Graph) ──
+    logs.push(logEntry(`Looking up source account: ${sourceIdentity}`));
+    await updateItemProgress(itemId, 'in_progress', logs);
+
     let sourceLookupError: string | null = null;
     const sourceUser = await source
       .get(`/users/${encodeURIComponent(sourceIdentity)}?$select=id,displayName,givenName,surname,mail,userPrincipalName,usageLocation`)
       .catch((e: any) => { sourceLookupError = e.message; return null; });
 
     if (!sourceUser) {
-      const hint = sourceLookupError?.includes('403') || sourceLookupError?.toLowerCase().includes('insufficient')
-        ? ' (Permission denied — ensure User.Read.All is granted for the source tenant)'
+      const isPermission = sourceLookupError?.includes('403') || sourceLookupError?.toLowerCase().includes('insufficient') || sourceLookupError?.toLowerCase().includes('authorization');
+      const hint = isPermission
+        ? ' — Permission denied. Ensure User.Read.All is granted via admin consent on the SOURCE tenant app registration.'
         : sourceLookupError
-          ? ` (API error: ${sourceLookupError})`
-          : ' (account not found — check that the UPN is correct)';
+          ? ` — API error: ${sourceLookupError}`
+          : ' — Account not found. Check that the UPN in the source identity is correct.';
       throw new Error(`Source shared mailbox "${sourceIdentity}" not found${hint}`);
     }
-    logs.push(logEntry(`Found source mailbox: ${sourceUser.displayName} (${sourceUser.mail})`));
+    logs.push(logEntry(`✓ Found source account: ${sourceUser.displayName} (${sourceUser.mail || sourceUser.userPrincipalName})`));
 
-    const targetUpn = targetIdentity || sourceIdentity;
+    // ── Step 2: determine target UPN ──
+    // Priority: explicit targetIdentity > same alias on target default domain > same as source
+    let targetUpn = targetIdentity || '';
+    const alias = sourceIdentity.split('@')[0];
+
+    // If no explicit target, look up the target tenant's default verified domain and use that
+    if (!targetUpn || targetUpn === sourceIdentity) {
+      logs.push(logEntry(`No explicit target UPN set — looking up target tenant's verified domains...`));
+      await updateItemProgress(itemId, 'in_progress', logs);
+      try {
+        const domainsRes = await target.get(`/domains?$select=id,isDefault,isVerified`);
+        const domains: any[] = domainsRes.value || [];
+        const defaultDomain = domains.find((d: any) => d.isDefault && d.isVerified)?.id
+          || domains.find((d: any) => d.isVerified && !d.id.endsWith('.onmicrosoft.com'))?.id
+          || domains.find((d: any) => d.isVerified)?.id;
+        if (defaultDomain) {
+          targetUpn = `${alias}@${defaultDomain}`;
+          logs.push(logEntry(`  Auto-derived target UPN: ${targetUpn} (using target tenant's default domain "${defaultDomain}")`));
+        } else {
+          targetUpn = sourceIdentity;
+          logs.push(logEntry(`  ⚠ Could not determine target tenant domain — using source UPN (may fail if domain not verified in target)`));
+        }
+      } catch (e: any) {
+        targetUpn = sourceIdentity;
+        logs.push(logEntry(`  ⚠ Domain lookup failed (${e.message}) — using source UPN`));
+      }
+    }
+    logs.push(logEntry(`Target UPN: ${targetUpn}`));
+
     const targetDomain = targetUpn.split('@')[1] || '';
-    const mailNickname = targetUpn.split('@')[0].replace(/[^a-zA-Z0-9]/g, '') || 'sm' + Date.now();
+    const mailNickname = alias.replace(/[^a-zA-Z0-9]/g, '') || 'sm' + Date.now();
     const tempPassword = `Migr@tion${Math.random().toString(36).slice(-6).toUpperCase()}1!`;
 
-    // Warn if the target UPN domain looks like the source domain (no mapping rule applied)
-    const sourceDomain = sourceIdentity.split('@')[1] || '';
-    if (targetDomain && sourceDomain && targetDomain.toLowerCase() === sourceDomain.toLowerCase()) {
-      logs.push(logEntry(
-        `⚠ Target UPN uses the source domain "${targetDomain}". ` +
-        `Unless "${targetDomain}" is a verified domain in the target tenant, user creation will fail. ` +
-        `Use mapping rules to change the target address to a domain verified in the target tenant.`
-      ));
-    }
-
-    // Check if target user already exists
+    // ── Step 3: check if target account already exists ──
+    logs.push(logEntry(`Checking if account already exists in target...`));
+    await updateItemProgress(itemId, 'in_progress', logs);
     let targetUser = await target.get(`/users/${encodeURIComponent(targetUpn)}?$select=id,userPrincipalName`).catch(() => null);
+
     if (!targetUser) {
-      logs.push(logEntry(`Creating mailbox account in target: ${targetUpn}`));
+      logs.push(logEntry(`Creating account in target tenant: ${targetUpn}`));
+      await updateItemProgress(itemId, 'in_progress', logs);
       const payload: any = {
         accountEnabled: true,
         displayName: sourceUser.displayName,
@@ -1399,24 +1427,56 @@ async function migrateSharedMailbox(
       };
       if (sourceUser.givenName) payload.givenName = sourceUser.givenName;
       if (sourceUser.surname) payload.surname = sourceUser.surname;
+
+      let createError: string | null = null;
       try {
         targetUser = await target.post('/users', payload);
       } catch (e: any) {
-        const isDomainError = e.message?.toLowerCase().includes('domain') && (e.message?.toLowerCase().includes('verified') || e.message?.toLowerCase().includes('not present') || e.message?.toLowerCase().includes('available'));
-        const isPasswordError = e.message?.toLowerCase().includes('password');
-        if (isDomainError) {
-          throw new Error(
-            `Cannot create user with UPN "${targetUpn}": the domain "${targetDomain}" is not a verified domain in the target tenant. ` +
-            `Add a mapping rule to map this shared mailbox to an address in a domain that IS verified in the target tenant, then re-run.`
-          );
-        } else if (isPasswordError) {
-          throw new Error(`User creation failed (password policy): ${e.message}. Try setting a stronger password or check the target tenant's password policy.`);
-        }
-        throw new Error(`Failed to create user in target tenant: ${e.message}`);
+        createError = e.message;
       }
-      logs.push(logEntry(`✓ Account created (ID: ${targetUser.id})`));
-      logs.push(logEntry(`⚠ After migration: convert to shared mailbox in Exchange Admin Center or run: Set-Mailbox "${targetUpn}" -Type Shared`));
-      logs.push(logEntry(`  Temporary password: ${tempPassword}`));
+
+      // If domain-not-verified error, retry with onmicrosoft.com fallback
+      if (!targetUser && createError) {
+        const isDomainError = createError.toLowerCase().includes('domain') ||
+          createError.toLowerCase().includes('verified') ||
+          createError.toLowerCase().includes('not present') ||
+          createError.toLowerCase().includes('Request_BadRequest');
+
+        if (isDomainError) {
+          logs.push(logEntry(`  Domain error creating with "${targetDomain}": ${createError}`));
+          logs.push(logEntry(`  Attempting fallback: looking up .onmicrosoft.com domain...`));
+          await updateItemProgress(itemId, 'in_progress', logs);
+          try {
+            const domainsRes = await target.get(`/domains?$select=id,isVerified`);
+            const omsDomain = (domainsRes.value || []).find((d: any) => d.id.endsWith('.onmicrosoft.com') && d.isVerified)?.id;
+            if (omsDomain) {
+              const fallbackUpn = `${alias}@${omsDomain}`;
+              logs.push(logEntry(`  Retrying with onmicrosoft.com domain: ${fallbackUpn}`));
+              targetUser = await target.post('/users', { ...payload, userPrincipalName: fallbackUpn });
+              logs.push(logEntry(`✓ Account created using fallback domain: ${fallbackUpn}`));
+              logs.push(logEntry(`  To convert: Set-Mailbox "${fallbackUpn}" -Type Shared`));
+            } else {
+              throw new Error(
+                `Cannot create user "${targetUpn}": ${createError}. ` +
+                `The domain "${targetDomain}" is not verified in the target tenant. ` +
+                `Set the "Target domain" field in the Discovery tab to the correct domain before importing.`
+              );
+            }
+          } catch (fe: any) {
+            if (fe.message.startsWith('Cannot create')) throw fe;
+            throw new Error(`User creation failed: ${createError}. Fallback also failed: ${fe.message}`);
+          }
+        } else {
+          throw new Error(`Failed to create user in target tenant: ${createError}`);
+        }
+      }
+
+      if (targetUser) {
+        logs.push(logEntry(`✓ Account created (ID: ${targetUser.id})`));
+        logs.push(logEntry(`⚠ ACTION REQUIRED: Convert to shared mailbox in Exchange Admin Center`));
+        logs.push(logEntry(`  PowerShell: Set-Mailbox "${targetUser.userPrincipalName || targetUpn}" -Type Shared`));
+        logs.push(logEntry(`  Temporary password (if needed): ${tempPassword}`));
+      }
     } else {
       logs.push(logEntry(`Account already exists in target (ID: ${targetUser.id})`));
     }
@@ -1450,6 +1510,7 @@ async function migrateSharedMailbox(
     logs.push(logEntry('Note: Full mailbox delegate permissions (Add-MailboxPermission) require Exchange Online PowerShell — Graph API does not expose this endpoint.'));
     await updateItemProgress(itemId, 'completed', logs);
   } catch (err: any) {
+    console.error(`[migration] sharedmailbox ${itemId} FAILED:`, err.message);
     logs.push(logEntry(`Shared mailbox migration failed: ${err.message}`));
     await updateItemProgress(itemId, 'failed', logs, err.message);
   }
@@ -1565,6 +1626,7 @@ async function migrateM365Group(
     logs.push(logEntry('✓ M365 Group migration complete'));
     await updateItemProgress(itemId, 'completed', logs);
   } catch (err: any) {
+    console.error(`[migration] m365group ${itemId} FAILED:`, err.message);
     logs.push(logEntry(`M365 Group migration failed: ${err.message}`));
     await updateItemProgress(itemId, 'failed', logs, err.message);
   }
