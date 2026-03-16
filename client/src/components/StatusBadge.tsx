@@ -1,6 +1,6 @@
 import { cn } from "@/lib/utils";
 
-type Status = "draft" | "active" | "completed" | "archived" | "pending" | "in_progress" | "failed";
+type Status = "draft" | "active" | "completed" | "archived" | "pending" | "in_progress" | "failed" | "needs_action";
 
 interface StatusBadgeProps {
   status: Status | string;
@@ -16,12 +16,17 @@ export function StatusBadge({ status, className }: StatusBadgeProps) {
     completed: "bg-emerald-50 text-emerald-700 border-emerald-200",
     failed: "bg-red-50 text-red-700 border-red-200",
     archived: "bg-amber-50 text-amber-700 border-amber-200",
+    needs_action: "bg-amber-50 text-amber-700 border-amber-300 dark:bg-amber-950/30 dark:text-amber-400 dark:border-amber-700",
   };
 
   const normalizedStatus = status.toLowerCase();
   const style = styles[normalizedStatus] || styles.draft;
-  
-  const label = normalizedStatus.replace('_', ' ');
+
+  const labelOverrides: Record<string, string> = {
+    needs_action: "Needs Action",
+    in_progress: "In Progress",
+  };
+  const label = labelOverrides[normalizedStatus] ?? normalizedStatus.replace(/_/g, ' ');
 
   return (
     <span 
@@ -35,6 +40,7 @@ export function StatusBadge({ status, className }: StatusBadgeProps) {
         "w-1.5 h-1.5 rounded-full mr-1.5", 
         normalizedStatus === "completed" ? "bg-emerald-500" :
         normalizedStatus === "failed" ? "bg-red-500" :
+        normalizedStatus === "needs_action" ? "bg-amber-500" :
         normalizedStatus === "in_progress" || normalizedStatus === "active" ? "bg-blue-500" :
         "bg-slate-400"
       )} />

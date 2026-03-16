@@ -372,7 +372,7 @@ export default function ProjectDetails() {
                   <div className="space-y-0.5">
                     {MIGRATION_SERVICES.map(({ key, label, icon: Icon, itemTypes }) => {
                       const count = items?.filter(i => (itemTypes as readonly string[]).includes(i.itemType)).length || 0;
-                      const pending = items?.filter(i => (itemTypes as readonly string[]).includes(i.itemType) && (i.status === 'pending' || i.status === 'failed')).length || 0;
+                      const pending = items?.filter(i => (itemTypes as readonly string[]).includes(i.itemType) && (i.status === 'pending' || i.status === 'failed' || i.status === 'needs_action')).length || 0;
                       const active = currentView === key;
                       return (
                         <button
@@ -629,7 +629,7 @@ export default function ProjectDetails() {
                   return <EntraToAdTab key={key} projectId={id} project={project} />;
                 }
                 const svcItems = (items || []).filter(i => (itemTypes as readonly string[]).includes(i.itemType));
-                const pending = svcItems.filter(i => i.status === 'pending' || i.status === 'failed').length;
+                const pending = svcItems.filter(i => i.status === 'pending' || i.status === 'failed' || i.status === 'needs_action').length;
                 const svcItemType = itemTypes[0] as string;
                 return (
                   <div key={key} className="space-y-5">
@@ -655,7 +655,7 @@ export default function ProjectDetails() {
                           <Button onClick={async () => {
                             try {
                               await Promise.all(
-                                svcItems.filter(i => i.status === 'pending' || i.status === 'failed')
+                                svcItems.filter(i => i.status === 'pending' || i.status === 'failed' || i.status === 'needs_action')
                                   .map(i => apiRequest('POST', `/api/projects/${id}/items/${i.id}/migrate`))
                               );
                               toast({ title: "Migration started", description: `Running ${pending} ${label} item(s).` });
@@ -687,11 +687,12 @@ export default function ProjectDetails() {
                     </div>
 
                     {/* Service stats */}
-                    <div className="grid grid-cols-4 gap-3">
+                    <div className="grid grid-cols-5 gap-3">
                       {[
                         { label: 'Total', value: svcItems.length, color: '' },
                         { label: 'Pending', value: svcItems.filter(i => i.status === 'pending').length, color: 'text-slate-600' },
                         { label: 'Completed', value: svcItems.filter(i => i.status === 'completed').length, color: 'text-emerald-600' },
+                        { label: 'Needs Action', value: svcItems.filter(i => i.status === 'needs_action').length, color: 'text-amber-600' },
                         { label: 'Failed', value: svcItems.filter(i => i.status === 'failed').length, color: 'text-red-600' },
                       ].map(({ label: sl, value, color }) => (
                         <Card key={sl} className="shadow-sm">
@@ -755,7 +756,7 @@ export default function ProjectDetails() {
                               const pct = item.progressPercent ?? 0;
                               const isSelected = selectedServiceItems.has(item.id);
                               return (
-                              <tr key={item.id} className={`hover:bg-muted/20 ${item.status === 'in_progress' ? 'bg-blue-50/40 dark:bg-blue-950/20' : ''} ${isSelected ? 'bg-red-50/30 dark:bg-red-950/20' : ''}`} data-testid={`row-item-${item.id}`}>
+                              <tr key={item.id} className={`hover:bg-muted/20 ${item.status === 'in_progress' ? 'bg-blue-50/40 dark:bg-blue-950/20' : ''} ${item.status === 'needs_action' ? 'bg-amber-50/50 dark:bg-amber-950/20' : ''} ${isSelected ? 'bg-red-50/30 dark:bg-red-950/20' : ''}`} data-testid={`row-item-${item.id}`}>
                                 <td className="px-3 py-3.5">
                                   <input
                                     type="checkbox"
@@ -779,6 +780,11 @@ export default function ProjectDetails() {
                                   </div>
                                   {item.status === 'failed' && item.errorDetails && (
                                     <div className="text-xs text-red-500 mt-1 max-w-[180px] truncate" title={item.errorDetails} data-testid={`text-error-${item.id}`}>{item.errorDetails}</div>
+                                  )}
+                                  {item.status === 'needs_action' && (
+                                    <div className="text-xs text-amber-600 dark:text-amber-400 mt-1 max-w-[200px] truncate" title={item.errorDetails || 'Manual action required — open logs for details'} data-testid={`text-needs-action-${item.id}`}>
+                                      ⚠ Action required — open logs
+                                    </div>
                                   )}
                                 </td>
                                 <td className="px-5 py-3.5 min-w-[220px]" data-testid={`progress-cell-${item.id}`}>
@@ -837,17 +843,17 @@ export default function ProjectDetails() {
                                         </Button>
                                       );
                                     })()}
-                                    {(item.status === 'pending' || item.status === 'failed') && (
-                                      <Button size="sm" variant="ghost" onClick={() => handleMigrateItem(item.id)} title="Start" data-testid={`button-migrate-${item.id}`}>
+                                    {(item.status === 'pending' || item.status === 'failed' || item.status === 'needs_action') && (
+                                      <Button size="sm" variant="ghost" onClick={() => handleMigrateItem(item.id)} title="Start / Retry" data-testid={`button-migrate-${item.id}`}>
                                         <Play className="w-4 h-4 text-emerald-600" />
                                       </Button>
                                     )}
-                                    {item.status === 'failed' && (
-                                      <Button size="sm" variant="ghost" onClick={() => handleRetry(item.id)} title="Reset" data-testid={`button-retry-${item.id}`}>
+                                    {(item.status === 'failed' || item.status === 'needs_action') && (
+                                      <Button size="sm" variant="ghost" onClick={() => handleRetry(item.id)} title="Reset to pending" data-testid={`button-retry-${item.id}`}>
                                         <RotateCw className="w-4 h-4 text-blue-600" />
                                       </Button>
                                     )}
-                                    {(item.status === 'in_progress' || item.status === 'completed' || item.status === 'failed') && (
+                                    {(item.status === 'in_progress' || item.status === 'completed' || item.status === 'failed' || item.status === 'needs_action') && (
                                       <Button size="sm" variant="ghost" onClick={() => handleViewLogs(item)} title="Logs" data-testid={`button-logs-${item.id}`}>
                                         <FileText className="w-4 h-4 text-slate-500" />
                                       </Button>
@@ -952,7 +958,7 @@ export default function ProjectDetails() {
               <div className="flex justify-center py-8"><Loader2 className="animate-spin text-slate-400" /></div>
             ) : itemLogs.length > 0 ? (
               itemLogs.map((log, i) => (
-                <div key={i} className={`py-0.5 ${log.includes('failed') || log.includes('Failed') || log.includes('Error') ? 'text-red-400' : log.includes('complete') || log.includes('Complete') || log.includes('success') ? 'text-emerald-400' : ''}`}>
+                <div key={i} className={`py-0.5 ${log.includes('failed') || log.includes('Failed') || log.includes('Error') ? 'text-red-400' : log.includes('ACTION REQUIRED') || log.includes('Needs Action') || log.includes('⚠') ? 'text-amber-300' : log.includes('complete') || log.includes('Complete') || log.includes('success') || log.includes('✓') ? 'text-emerald-400' : ''}`}>
                   {log}
                 </div>
               ))

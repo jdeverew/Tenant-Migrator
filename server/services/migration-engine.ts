@@ -1,7 +1,7 @@
 import { GraphClient } from "./graph-client";
 import { storage } from "../storage";
 import type { Project, MigrationItem } from "@shared/schema";
-import { readMailboxDelegates, applyMailboxDelegates, type ExoConfig } from "./exo-runner";
+import { readMailboxDelegates, applyMailboxDelegates, convertToSharedMailbox, type ExoConfig } from "./exo-runner";
 
 function logEntry(message: string): string {
   return `[${new Date().toISOString()}] ${message}`;
@@ -1531,18 +1531,61 @@ async function migrateSharedMailbox(
       logs.push(logEntry(`  Calendar permissions migrated: ${permsMigrated}/${calPermsSrc.length}`));
     }
 
-    logs.push(logEntry('✓ Shared mailbox migration complete'));
+    // ── EXO: Convert user account to shared mailbox ──────────────────────
+    const exo = project?.exoSettings as any;
+    const hasSourceExo = !!(exo?.sourceCertPath && exo?.sourceOrg);
+    const hasTargetExo = !!(exo?.targetCertPath && exo?.targetOrg);
+    const autoDelegate = exo?.autoDelegate !== false;
 
-    // ── EXO delegate migration (automatic if configured) ──────────────────
+    let mailboxConverted = false;
+
+    if (hasTargetExo) {
+      logs.push(logEntry(''));
+      logs.push(logEntry('════ Converting user account to shared mailbox (Exchange Online PowerShell) ════'));
+      logs.push(logEntry(`Running Set-Mailbox -Type Shared on: ${targetUpn}`));
+      logs.push(logEntry('  (Waiting for Exchange identity provisioning — this may take up to 90 seconds...)'));
+      await updateItemProgress(itemId, 'in_progress', logs);
+
+      const targetCfg: ExoConfig = {
+        clientId: project!.targetClientId!,
+        certPath: exo.targetCertPath,
+        certPassword: exo.targetCertPassword || '',
+        organization: exo.targetOrg,
+      };
+
+      const convertResult = await convertToSharedMailbox(targetCfg, targetUpn);
+      for (const line of convertResult.output) {
+        logs.push(logEntry(`  ${line}`));
+      }
+      if (convertResult.success) {
+        mailboxConverted = true;
+        logs.push(logEntry(`✓ Shared mailbox conversion successful: ${targetUpn}`));
+      } else {
+        logs.push(logEntry(`⚠ Shared mailbox conversion errors: ${convertResult.errors.slice(0, 3).join('; ')}`));
+        logs.push(logEntry(`  You can re-run this migration once Exchange provisioning completes (usually within 1-5 minutes).`));
+        logs.push(logEntry(`  Or run manually in Exchange Online PowerShell:`));
+        logs.push(logEntry(`    Set-Mailbox -Identity "${targetUpn}" -Type Shared`));
+      }
+    } else {
+      // EXO not configured — the account was created as a regular user
+      logs.push(logEntry(''));
+      logs.push(logEntry('════ ACTION REQUIRED: Convert to shared mailbox ════'));
+      logs.push(logEntry(`A regular user account was created at "${targetUpn}" but it has NOT yet been converted to a shared mailbox.`));
+      logs.push(logEntry('Graph API cannot change the mailbox type — you must run this PowerShell command:'));
+      logs.push(logEntry(''));
+      logs.push(logEntry(`  Connect-ExchangeOnline`));
+      logs.push(logEntry(`  Set-Mailbox -Identity "${targetUpn}" -Type Shared`));
+      logs.push(logEntry(''));
+      logs.push(logEntry('Configure Exchange Online PowerShell in the Tenant Config tab to automate this step.'));
+      logs.push(logEntry('After completing the conversion, you can re-run this migration to apply delegate permissions.'));
+      logs.push(logEntry('══════════════════════════════════════════════════════'));
+    }
+
+    // ── EXO delegate migration (only runs if conversion succeeded) ────────
     logs.push(logEntry(''));
     logs.push(logEntry('════ Delegate Permissions (Exchange Online PowerShell) ════'));
 
-    const exo = project?.exoSettings as any;
-    const hasSourceExo = exo?.sourceCertPath && exo?.sourceOrg;
-    const hasTargetExo = exo?.targetCertPath && exo?.targetOrg;
-    const autoDelegate = exo?.autoDelegate !== false; // default true when EXO configured
-
-    if (hasSourceExo && hasTargetExo && autoDelegate) {
+    if (hasSourceExo && hasTargetExo && autoDelegate && mailboxConverted) {
       // ── Fully automatic: read delegates from source, apply to target ──
       logs.push(logEntry('Exchange Online PowerShell configured — running automatic delegate migration...'));
       await updateItemProgress(itemId, 'in_progress', logs);
@@ -1607,7 +1650,16 @@ async function migrateSharedMailbox(
     }
     logs.push(logEntry('══════════════════════════════════════════════════════════'));
 
-    await updateItemProgress(itemId, 'completed', logs);
+    // ── Final status: only truly 'completed' if the mailbox type was converted ──
+    if (mailboxConverted) {
+      logs.push(logEntry('✓ Shared mailbox fully migrated (account created + converted to shared mailbox + delegates applied)'));
+      await updateItemProgress(itemId, 'completed', logs);
+    } else {
+      // Account was created (or already existed) but the mailbox type conversion is still needed
+      logs.push(logEntry('⚠ STATUS: Needs Action — account was created but must still be converted to a shared mailbox type.'));
+      logs.push(logEntry('   See the ACTION REQUIRED section above for the PowerShell command, or configure EXO in Tenant Config to automate this.'));
+      await updateItemProgress(itemId, 'needs_action', logs, 'Account created but not yet converted to shared mailbox type. Run Set-Mailbox -Type Shared or configure EXO PowerShell in Tenant Config.');
+    }
   } catch (err: any) {
     console.error(`[migration] sharedmailbox ${itemId} FAILED:`, err.message);
     logs.push(logEntry(`Shared mailbox migration failed: ${err.message}`));

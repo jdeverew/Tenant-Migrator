@@ -232,6 +232,38 @@ Disconnect-ExchangeOnline -Confirm:$false -ErrorAction SilentlyContinue
   return runPowerShellScript(script);
 }
 
+// Convert a regular user mailbox to a shared mailbox
+export async function convertToSharedMailbox(cfg: ExoConfig, mailboxIdentity: string): Promise<ExoResult> {
+  const escaped = mailboxIdentity.replace(/'/g, "''");
+  const script = `
+$ErrorActionPreference = 'Stop'
+${buildConnectBlock(cfg)}
+# Wait up to 90s for Exchange identity to be provisioned after account creation
+$maxTries = 9; $try = 0; $found = $false
+while ($try -lt $maxTries) {
+  try {
+    $mb = Get-Mailbox -Identity '${escaped}' -ErrorAction Stop
+    $found = $true
+    break
+  } catch {
+    $try++
+    if ($try -lt $maxTries) { Start-Sleep -Seconds 10 }
+  }
+}
+if (-not $found) {
+  throw "Mailbox '${escaped}' not found after $($maxTries * 10)s — Exchange identity may not be provisioned yet. Re-run after a few minutes."
+}
+if ($mb.RecipientTypeDetails -eq 'SharedMailbox') {
+  Write-Host "Already a shared mailbox: ${escaped}"
+} else {
+  Set-Mailbox -Identity '${escaped}' -Type Shared -Confirm:$false
+  Write-Host "Converted to shared mailbox: ${escaped}"
+}
+Disconnect-ExchangeOnline -Confirm:$false -ErrorAction SilentlyContinue
+`;
+  return runPowerShellScript(script);
+}
+
 // Quick connectivity test — verifies cert auth works
 export async function testExoConnection(cfg: ExoConfig): Promise<ExoResult> {
   const script = `
