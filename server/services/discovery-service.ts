@@ -163,6 +163,81 @@ export interface DiscoveredOneDrive {
   lastModified: string | null;
 }
 
+export interface DiscoveredGroup {
+  id: string;
+  displayName: string;
+  mail: string | null;
+  mailNickname: string | null;
+  description: string | null;
+  visibility: string | null;
+  memberCount: number;
+  ownerCount: number;
+}
+
+export interface DiscoveredSharedMailbox {
+  id: string;
+  displayName: string;
+  userPrincipalName: string;
+  mail: string | null;
+  memberCount: number; // full-access members
+}
+
+export async function discoverDistributionGroups(client: GraphClient): Promise<DiscoveredGroup[]> {
+  // Mail-enabled, non-security, non-Unified groups = classic distribution lists
+  const groups = await client.getAllPages<any>(
+    `/groups?$filter=mailEnabled eq true and securityEnabled eq false&$select=id,displayName,mail,mailNickname,description,visibility&$top=100`
+  );
+  const results: DiscoveredGroup[] = [];
+  for (const g of groups) {
+    // Exclude M365 Unified groups (they are returned by the same filter sometimes)
+    if ((g.groupTypes || []).includes('Unified')) continue;
+    let memberCount = 0, ownerCount = 0;
+    try { memberCount = (await client.get(`/groups/${g.id}/members?$select=id&$top=1`))['@odata.count'] || 0; } catch { }
+    try { ownerCount = (await client.get(`/groups/${g.id}/owners?$select=id&$top=1`))['@odata.count'] || 0; } catch { }
+    results.push({ id: g.id, displayName: g.displayName, mail: g.mail || null, mailNickname: g.mailNickname || null, description: g.description || null, visibility: g.visibility || null, memberCount, ownerCount });
+  }
+  return results;
+}
+
+export async function discoverSharedMailboxes(client: GraphClient): Promise<DiscoveredSharedMailbox[]> {
+  // Shared mailboxes have no assigned licenses but have a mailbox
+  // Use beta API mailboxType filter where possible, fall back to unlicensed-with-mail heuristic
+  let users: any[] = [];
+  try {
+    const res = await client.get(`https://graph.microsoft.com/beta/users?$select=id,displayName,userPrincipalName,mail,assignedLicenses&$filter=assignedLicenses/$count eq 0 and mail ne null&$count=true&ConsistencyLevel=eventual&$top=999`);
+    users = res.value || [];
+  } catch {
+    // Fallback: get all unlicensed users
+    const all = await client.getAllPages<any>(`/users?$select=id,displayName,userPrincipalName,mail,assignedLicenses&$top=999`);
+    users = all.filter((u: any) => (u.assignedLicenses || []).length === 0 && u.mail && !u.userPrincipalName?.includes('#EXT#'));
+  }
+
+  const results: DiscoveredSharedMailbox[] = [];
+  for (const u of users) {
+    if (!u.mail || u.userPrincipalName?.includes('#EXT#')) continue;
+    // Verify it has a mailbox by checking mailbox settings
+    try {
+      await client.get(`/users/${u.id}/mailboxSettings`);
+      results.push({ id: u.id, displayName: u.displayName || u.userPrincipalName, userPrincipalName: u.userPrincipalName, mail: u.mail, memberCount: 0 });
+    } catch { /* no mailbox */ }
+  }
+  return results;
+}
+
+export async function discoverM365Groups(client: GraphClient): Promise<DiscoveredGroup[]> {
+  const groups = await client.getAllPages<any>(
+    `/groups?$filter=groupTypes/any(c:c eq 'Unified')&$select=id,displayName,mail,mailNickname,description,visibility&$top=100`
+  );
+  const results: DiscoveredGroup[] = [];
+  for (const g of groups) {
+    let memberCount = 0, ownerCount = 0;
+    try { memberCount = (await client.get(`/groups/${g.id}/members?$select=id&$top=1`))['@odata.count'] || 0; } catch { }
+    try { ownerCount = (await client.get(`/groups/${g.id}/owners?$select=id&$top=1`))['@odata.count'] || 0; } catch { }
+    results.push({ id: g.id, displayName: g.displayName, mail: g.mail || null, mailNickname: g.mailNickname || null, description: g.description || null, visibility: g.visibility || 'Private', memberCount, ownerCount });
+  }
+  return results;
+}
+
 export async function discoverOneDrives(client: GraphClient): Promise<DiscoveredOneDrive[]> {
   const users = await client.getAllPages<any>(
     `/users?$select=id,displayName,userPrincipalName,assignedLicenses&$top=999`

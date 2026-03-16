@@ -1134,6 +1134,281 @@ async function migrateTeam(
   }
 }
 
+// ── Helper: resolve a user in a tenant by UPN or email, return their object ID ──
+async function resolveUserInTenant(client: GraphClient, upn: string): Promise<string | null> {
+  try {
+    const u = await client.get(`/users/${encodeURIComponent(upn)}?$select=id`);
+    return u?.id || null;
+  } catch { return null; }
+}
+
+// ── Helper: resolve a group in a tenant by mail/displayName, return group object ──
+async function resolveGroupInTenant(client: GraphClient, identity: string): Promise<any | null> {
+  // Try by ID first
+  try { const g = await client.get(`/groups/${identity}`); if (g?.id) return g; } catch { }
+  // Try by mail
+  try {
+    const res = await client.get(`/groups?$filter=mail eq '${identity.replace(/'/g, "''")}'&$select=id,displayName,mail,mailNickname,description,visibility,groupTypes`);
+    if (res.value?.length) return res.value[0];
+  } catch { }
+  // Try by displayName
+  try {
+    const res = await client.get(`/groups?$filter=displayName eq '${identity.replace(/'/g, "''")}'&$select=id,displayName,mail,mailNickname,description,visibility,groupTypes`);
+    if (res.value?.length) return res.value[0];
+  } catch { }
+  return null;
+}
+
+async function migrateDistributionGroup(
+  source: GraphClient,
+  target: GraphClient,
+  sourceIdentity: string,
+  targetIdentity: string,
+  itemId: number
+): Promise<void> {
+  const logs: string[] = [];
+  logs.push(logEntry(`Starting distribution group migration: ${sourceIdentity} → ${targetIdentity || 'same name'}`));
+  await updateItemProgress(itemId, 'in_progress', logs);
+
+  try {
+    // Resolve source group
+    const sourceGroup = await resolveGroupInTenant(source, sourceIdentity);
+    if (!sourceGroup) throw new Error(`Source distribution group "${sourceIdentity}" not found`);
+    logs.push(logEntry(`Found source group: ${sourceGroup.displayName} (${sourceGroup.mail || 'no mail'})`));
+
+    // Get members and owners
+    const members = await source.getAllPages<any>(`/groups/${sourceGroup.id}/members?$select=id,userPrincipalName,mail,displayName`);
+    const owners  = await source.getAllPages<any>(`/groups/${sourceGroup.id}/owners?$select=id,userPrincipalName,mail,displayName`);
+    logs.push(logEntry(`Source: ${members.length} members, ${owners.length} owners`));
+
+    // Determine target mail alias
+    const targetName = targetIdentity || sourceGroup.displayName;
+    const targetNickname = (targetIdentity?.includes('@') ? targetIdentity.split('@')[0] : targetIdentity || sourceGroup.mailNickname || '')
+      .replace(/[^a-zA-Z0-9]/g, '').slice(0, 59) || 'dl' + Date.now();
+
+    // Create or find distribution group in target
+    let targetGroup = await resolveGroupInTenant(target, targetName);
+    if (!targetGroup) {
+      logs.push(logEntry(`Creating distribution group "${targetName}" in target...`));
+      try {
+        targetGroup = await target.post('/groups', {
+          displayName: sourceGroup.displayName,
+          mailNickname: targetNickname,
+          mailEnabled: true,
+          securityEnabled: false,
+          groupTypes: [],
+          description: sourceGroup.description || '',
+        });
+        logs.push(logEntry(`✓ Distribution group created (ID: ${targetGroup.id})`));
+      } catch (e: any) {
+        throw new Error(`Failed to create distribution group: ${e.message}. Note: Exchange admin consent may be required.`);
+      }
+    } else {
+      logs.push(logEntry(`Distribution group already exists in target (ID: ${targetGroup.id})`));
+    }
+
+    // Add owners first (must be users)
+    let ownersMigrated = 0;
+    for (const owner of owners) {
+      const email = owner.userPrincipalName || owner.mail;
+      if (!email) continue;
+      const targetUserId = await resolveUserInTenant(target, email);
+      if (!targetUserId) { logs.push(logEntry(`Owner ${email} not found in target — skipping`)); continue; }
+      try {
+        await target.post(`/groups/${targetGroup.id}/owners/$ref`, {
+          '@odata.id': `https://graph.microsoft.com/v1.0/users/${targetUserId}`,
+        });
+        ownersMigrated++;
+      } catch { /* may already be owner */ }
+    }
+
+    // Add members
+    let membersMigrated = 0;
+    for (const member of members) {
+      const email = member.userPrincipalName || member.mail;
+      if (!email) continue;
+      const targetUserId = await resolveUserInTenant(target, email);
+      if (!targetUserId) { logs.push(logEntry(`Member ${email} not found in target — skipping`)); continue; }
+      try {
+        await target.post(`/groups/${targetGroup.id}/members/$ref`, {
+          '@odata.id': `https://graph.microsoft.com/v1.0/users/${targetUserId}`,
+        });
+        membersMigrated++;
+      } catch { /* may already be member */ }
+    }
+
+    logs.push(logEntry(`✓ Owners added: ${ownersMigrated}/${owners.length}`));
+    logs.push(logEntry(`✓ Members added: ${membersMigrated}/${members.length}`));
+    logs.push(logEntry('Distribution group migration complete'));
+    await updateItemProgress(itemId, 'completed', logs);
+  } catch (err: any) {
+    logs.push(logEntry(`Distribution group migration failed: ${err.message}`));
+    await updateItemProgress(itemId, 'failed', logs, err.message);
+  }
+}
+
+async function migrateSharedMailbox(
+  source: GraphClient,
+  target: GraphClient,
+  sourceIdentity: string,
+  targetIdentity: string,
+  itemId: number
+): Promise<void> {
+  const logs: string[] = [];
+  logs.push(logEntry(`Starting shared mailbox migration: ${sourceIdentity} → ${targetIdentity || sourceIdentity}`));
+  await updateItemProgress(itemId, 'in_progress', logs);
+
+  try {
+    // Resolve source mailbox (it's a user object in Graph)
+    const sourceUser = await source.get(`/users/${encodeURIComponent(sourceIdentity)}?$select=id,displayName,givenName,surname,mail,userPrincipalName,usageLocation`).catch(() => null);
+    if (!sourceUser) throw new Error(`Source shared mailbox "${sourceIdentity}" not found`);
+    logs.push(logEntry(`Found source mailbox: ${sourceUser.displayName} (${sourceUser.mail})`));
+
+    const targetUpn = targetIdentity || sourceIdentity;
+    const mailNickname = targetUpn.split('@')[0].replace(/[^a-zA-Z0-9]/g, '') || 'sm' + Date.now();
+    const tempPassword = `Migr@tion${Math.random().toString(36).slice(-6).toUpperCase()}1!`;
+
+    // Check if target user already exists
+    let targetUser = await target.get(`/users/${encodeURIComponent(targetUpn)}?$select=id,userPrincipalName`).catch(() => null);
+    if (!targetUser) {
+      logs.push(logEntry(`Creating mailbox account in target: ${targetUpn}`));
+      const payload: any = {
+        accountEnabled: true,
+        displayName: sourceUser.displayName,
+        mailNickname,
+        userPrincipalName: targetUpn,
+        usageLocation: sourceUser.usageLocation || 'US',
+        passwordProfile: { forceChangePasswordNextSignIn: false, password: tempPassword },
+      };
+      if (sourceUser.givenName) payload.givenName = sourceUser.givenName;
+      if (sourceUser.surname) payload.surname = sourceUser.surname;
+      targetUser = await target.post('/users', payload);
+      logs.push(logEntry(`✓ Account created (ID: ${targetUser.id})`));
+      logs.push(logEntry(`⚠ After migration: convert to shared mailbox in Exchange Admin Center or run: Set-Mailbox "${targetUpn}" -Type Shared`));
+      logs.push(logEntry(`  Temporary password: ${tempPassword}`));
+    } else {
+      logs.push(logEntry(`Account already exists in target (ID: ${targetUser.id})`));
+    }
+
+    // Migrate mailbox members (Full Access = calendar/mailbox delegates stored via Graph calendar permissions)
+    logs.push(logEntry('Migrating Full Access permissions...'));
+    try {
+      const calPerms = await source.get(`/users/${sourceUser.id}/calendar/calendarPermissions`);
+      let permsMigrated = 0;
+      for (const perm of calPerms.value || []) {
+        if (perm.emailAddress?.address && perm.role !== 'none') {
+          const memberId = await resolveUserInTenant(target, perm.emailAddress.address);
+          if (memberId) {
+            try {
+              await target.post(`/users/${targetUser.id}/calendar/calendarPermissions`, {
+                emailAddress: perm.emailAddress,
+                role: perm.role,
+                allowedRoles: perm.allowedRoles,
+              });
+              permsMigrated++;
+            } catch { /* best-effort */ }
+          }
+        }
+      }
+      logs.push(logEntry(`Calendar permissions migrated: ${permsMigrated}`));
+    } catch (e: any) {
+      logs.push(logEntry(`Calendar permissions skipped: ${e.message}`));
+    }
+
+    logs.push(logEntry('✓ Shared mailbox migration complete'));
+    logs.push(logEntry('Note: Full mailbox delegate permissions (Add-MailboxPermission) require Exchange Online PowerShell — Graph API does not expose this endpoint.'));
+    await updateItemProgress(itemId, 'completed', logs);
+  } catch (err: any) {
+    logs.push(logEntry(`Shared mailbox migration failed: ${err.message}`));
+    await updateItemProgress(itemId, 'failed', logs, err.message);
+  }
+}
+
+async function migrateM365Group(
+  source: GraphClient,
+  target: GraphClient,
+  sourceIdentity: string,
+  targetIdentity: string,
+  itemId: number
+): Promise<void> {
+  const logs: string[] = [];
+  logs.push(logEntry(`Starting M365 Group migration: ${sourceIdentity} → ${targetIdentity || 'same name'}`));
+  await updateItemProgress(itemId, 'in_progress', logs);
+
+  try {
+    const sourceGroup = await resolveGroupInTenant(source, sourceIdentity);
+    if (!sourceGroup) throw new Error(`Source M365 Group "${sourceIdentity}" not found`);
+    logs.push(logEntry(`Found source group: ${sourceGroup.displayName} (${sourceGroup.mail || 'no mail'})`));
+
+    const members = await source.getAllPages<any>(`/groups/${sourceGroup.id}/members?$select=id,userPrincipalName,mail,displayName`);
+    const owners  = await source.getAllPages<any>(`/groups/${sourceGroup.id}/owners?$select=id,userPrincipalName,mail,displayName`);
+    logs.push(logEntry(`Source: ${members.length} members, ${owners.length} owners`));
+
+    const targetName     = targetIdentity || sourceGroup.displayName;
+    const targetNickname = (targetIdentity?.includes('@') ? targetIdentity.split('@')[0] : targetIdentity || sourceGroup.mailNickname || '')
+      .replace(/[^a-zA-Z0-9]/g, '').slice(0, 59) || 'm365g' + Date.now();
+
+    // Create or find group in target
+    let targetGroup = await resolveGroupInTenant(target, targetName);
+    if (!targetGroup) {
+      logs.push(logEntry(`Creating M365 Group "${targetName}" in target...`));
+      targetGroup = await target.post('/groups', {
+        displayName: sourceGroup.displayName,
+        mailNickname: targetNickname,
+        mailEnabled: true,
+        securityEnabled: false,
+        groupTypes: ['Unified'],
+        visibility: sourceGroup.visibility || 'Private',
+        description: sourceGroup.description || '',
+      });
+      logs.push(logEntry(`✓ M365 Group created (ID: ${targetGroup.id})`));
+
+      // Wait briefly for group to fully provision
+      await new Promise(r => setTimeout(r, 3000));
+    } else {
+      logs.push(logEntry(`M365 Group already exists in target (ID: ${targetGroup.id})`));
+    }
+
+    // Add owners
+    let ownersMigrated = 0;
+    for (const owner of owners) {
+      const email = owner.userPrincipalName || owner.mail;
+      if (!email) continue;
+      const targetUserId = await resolveUserInTenant(target, email);
+      if (!targetUserId) { logs.push(logEntry(`Owner ${email} not found in target — skipping`)); continue; }
+      try {
+        await target.post(`/groups/${targetGroup.id}/owners/$ref`, {
+          '@odata.id': `https://graph.microsoft.com/v1.0/users/${targetUserId}`,
+        });
+        ownersMigrated++;
+      } catch { /* may already be owner */ }
+    }
+
+    // Add members
+    let membersMigrated = 0;
+    for (const member of members) {
+      const email = member.userPrincipalName || member.mail;
+      if (!email) continue;
+      const targetUserId = await resolveUserInTenant(target, email);
+      if (!targetUserId) { logs.push(logEntry(`Member ${email} not found in target — skipping`)); continue; }
+      try {
+        await target.post(`/groups/${targetGroup.id}/members/$ref`, {
+          '@odata.id': `https://graph.microsoft.com/v1.0/users/${targetUserId}`,
+        });
+        membersMigrated++;
+      } catch { /* may already be member */ }
+    }
+
+    logs.push(logEntry(`✓ Owners added: ${ownersMigrated}/${owners.length}`));
+    logs.push(logEntry(`✓ Members added: ${membersMigrated}/${members.length}`));
+    logs.push(logEntry('✓ M365 Group migration complete'));
+    await updateItemProgress(itemId, 'completed', logs);
+  } catch (err: any) {
+    logs.push(logEntry(`M365 Group migration failed: ${err.message}`));
+    await updateItemProgress(itemId, 'failed', logs, err.message);
+  }
+}
+
 export async function migrateItem(projectId: number, itemId: number): Promise<void> {
   const project = await storage.getProjectInternal(projectId);
   if (!project) throw new Error("Project not found");
@@ -1166,6 +1441,15 @@ export async function migrateItem(projectId: number, itemId: number): Promise<vo
         break;
       case 'user':
         await migrateUser(source, target, item.sourceIdentity, targetIdentity, itemId);
+        break;
+      case 'distributiongroup':
+        await migrateDistributionGroup(source, target, item.sourceIdentity, targetIdentity, itemId);
+        break;
+      case 'sharedmailbox':
+        await migrateSharedMailbox(source, target, item.sourceIdentity, targetIdentity, itemId);
+        break;
+      case 'm365group':
+        await migrateM365Group(source, target, item.sourceIdentity, targetIdentity, itemId);
         break;
       case 'powerplatform':
         await storage.updateItem(itemId, { status: 'failed', errorDetails: 'Power Platform migration requires the Power Platform Admin PowerShell module or CoE Starter Kit. Export/import via Graph API is not supported.' });

@@ -3,7 +3,7 @@ import { useProject, useProjectStats, useUpdateProject } from "@/hooks/use-proje
 import { useMigrationItems, useCreateMigrationItem, useUpdateMigrationItem, useDeleteMigrationItem } from "@/hooks/use-items";
 import { Sidebar } from "@/components/Sidebar";
 import { StatusBadge } from "@/components/StatusBadge";
-import { Loader2, ArrowLeft, Mail, Cloud, Users, Plus, Trash2, RotateCw, Eye, EyeOff, CheckCircle2, XCircle, Shield, ExternalLink, Play, PlayCircle, FileText, Globe, KeyRound, Search, UserCheck, MapPin, Zap, AlertTriangle, Import, Boxes, Server, Download, Terminal, Wand2, Copy, Sparkles, HardDrive, RefreshCw } from "lucide-react";
+import { Loader2, ArrowLeft, Mail, Cloud, Users, Plus, Trash2, RotateCw, Eye, EyeOff, CheckCircle2, XCircle, Shield, ExternalLink, Play, PlayCircle, FileText, Globe, KeyRound, Search, UserCheck, MapPin, Zap, AlertTriangle, Import, Boxes, Server, Download, Terminal, Wand2, Copy, Sparkles, HardDrive, RefreshCw, AtSign, Inbox, Building2 } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip } from "recharts";
@@ -26,21 +26,24 @@ import { api, buildUrl } from "@shared/routes";
 const itemSchema = z.object({
   sourceIdentity: z.string().min(1, "Source identity is required"),
   targetIdentity: z.string().optional().or(z.literal("")),
-  itemType: z.enum(["mailbox", "onedrive", "sharepoint", "teams", "user", "powerplatform"]),
+  itemType: z.enum(["mailbox", "onedrive", "sharepoint", "teams", "user", "distributiongroup", "sharedmailbox", "m365group", "powerplatform"]),
 });
 
 type ItemFormData = z.infer<typeof itemSchema>;
 
-type ViewType = 'overview' | 'exchange' | 'sharepoint' | 'onedrive' | 'teams' | 'users' | 'powerplatform' | 'entra_ad' | 'discovery' | 'mapping' | 'tenant_config';
+type ViewType = 'overview' | 'exchange' | 'sharepoint' | 'onedrive' | 'teams' | 'users' | 'powerplatform' | 'entra_ad' | 'distributiongroups' | 'sharedmailboxes' | 'm365groups' | 'discovery' | 'mapping' | 'tenant_config';
 
 const MIGRATION_SERVICES = [
-  { key: 'exchange',      label: 'Exchange Online',      icon: Mail,      itemTypes: ['mailbox'],        description: 'Email, calendars & mailboxes' },
-  { key: 'sharepoint',    label: 'SharePoint Online',    icon: Globe,     itemTypes: ['sharepoint'],     description: 'Sites & document libraries' },
-  { key: 'onedrive',      label: 'OneDrive',             icon: Cloud,     itemTypes: ['onedrive'],       description: 'Personal files & folders' },
-  { key: 'teams',         label: 'Microsoft Teams',      icon: Users,     itemTypes: ['teams'],          description: 'Teams, channels & chats' },
-  { key: 'users',         label: 'User Accounts',        icon: UserCheck, itemTypes: ['user'],           description: 'User identities & accounts' },
-  { key: 'powerplatform', label: 'Power Platform',       icon: Zap,       itemTypes: ['powerplatform'],  description: 'Apps, flows & environments' },
-  { key: 'entra_ad',      label: 'Entra ID → On-Prem',  icon: Server,    itemTypes: ['entra_to_ad'],    description: 'Cloud to on-premises AD' },
+  { key: 'exchange',           label: 'Exchange Online',         icon: Mail,       itemTypes: ['mailbox'],            description: 'Email, calendars & mailboxes' },
+  { key: 'sharepoint',         label: 'SharePoint Online',       icon: Globe,      itemTypes: ['sharepoint'],         description: 'Sites & document libraries' },
+  { key: 'onedrive',           label: 'OneDrive',                icon: Cloud,      itemTypes: ['onedrive'],           description: 'Personal files & folders' },
+  { key: 'teams',              label: 'Microsoft Teams',         icon: Users,      itemTypes: ['teams'],              description: 'Teams, channels & chats' },
+  { key: 'users',              label: 'User Accounts',           icon: UserCheck,  itemTypes: ['user'],               description: 'User identities & accounts' },
+  { key: 'distributiongroups', label: 'Distribution Groups',     icon: AtSign,     itemTypes: ['distributiongroup'],  description: 'Mail-enabled distribution lists' },
+  { key: 'sharedmailboxes',    label: 'Shared Mailboxes',        icon: Inbox,      itemTypes: ['sharedmailbox'],      description: 'Shared mailboxes & delegates' },
+  { key: 'm365groups',         label: 'Microsoft 365 Groups',    icon: Building2,  itemTypes: ['m365group'],          description: 'M365 Groups with members & owners' },
+  { key: 'powerplatform',      label: 'Power Platform',          icon: Zap,        itemTypes: ['powerplatform'],      description: 'Apps, flows & environments' },
+  { key: 'entra_ad',           label: 'Entra ID → On-Prem',     icon: Server,     itemTypes: ['entra_to_ad'],        description: 'Cloud to on-premises AD' },
 ] as const;
 
 function formatBytes(bytes: number | null | undefined): string {
@@ -58,6 +61,9 @@ function ItemTypeIcon({ type }: { type: string }) {
     case 'sharepoint': return <Globe className="w-4 h-4 text-teal-500" />;
     case 'teams': return <Users className="w-4 h-4 text-indigo-500" />;
     case 'user': return <UserCheck className="w-4 h-4 text-violet-500" />;
+    case 'distributiongroup': return <AtSign className="w-4 h-4 text-orange-500" />;
+    case 'sharedmailbox': return <Inbox className="w-4 h-4 text-rose-500" />;
+    case 'm365group': return <Building2 className="w-4 h-4 text-cyan-500" />;
     case 'powerplatform': return <Zap className="w-4 h-4 text-amber-500" />;
     default: return null;
   }
@@ -679,6 +685,9 @@ export default function ProjectDetails() {
                         <SelectItem value="onedrive">OneDrive</SelectItem>
                         <SelectItem value="teams">Microsoft Teams</SelectItem>
                         <SelectItem value="user">User Account</SelectItem>
+                        <SelectItem value="distributiongroup">Distribution Group</SelectItem>
+                        <SelectItem value="sharedmailbox">Shared Mailbox</SelectItem>
+                        <SelectItem value="m365group">Microsoft 365 Group</SelectItem>
                         <SelectItem value="powerplatform">Power Platform</SelectItem>
                       </SelectContent>
                     </Select>
@@ -1002,7 +1011,7 @@ function TenantCredentialForm({
 
 // ======================== DISCOVERY TAB ========================
 
-type DiscoveryType = 'users' | 'onedrive' | 'sharepoint' | 'teams' | 'powerplatform';
+type DiscoveryType = 'users' | 'onedrive' | 'sharepoint' | 'teams' | 'powerplatform' | 'distributiongroups' | 'sharedmailboxes' | 'm365groups';
 
 interface DiscoveryTabProps {
   projectId: number;
@@ -1020,11 +1029,14 @@ function DiscoveryTab({ projectId, onImport }: DiscoveryTabProps) {
   const { toast } = useToast();
 
   const discoveryTypes: { id: DiscoveryType; label: string; icon: any; description: string }[] = [
-    { id: 'users',         label: 'Users',            icon: UserCheck,  description: 'Discover all licensed users with mailbox or OneDrive' },
-    { id: 'onedrive',      label: 'OneDrive',         icon: HardDrive,  description: 'Discover all provisioned OneDrive accounts with storage usage' },
-    { id: 'sharepoint',    label: 'SharePoint Sites', icon: Globe,      description: 'Discover all SharePoint sites with storage details' },
-    { id: 'teams',         label: 'Microsoft Teams',  icon: Users,      description: 'Discover all Teams with member and channel counts' },
-    { id: 'powerplatform', label: 'Power Platform',   icon: Zap,        description: 'Discover Power Apps and Power Automate flows' },
+    { id: 'users',              label: 'Users',                 icon: UserCheck,  description: 'Discover all licensed users with mailbox or OneDrive' },
+    { id: 'onedrive',           label: 'OneDrive',              icon: HardDrive,  description: 'Discover all provisioned OneDrive accounts with storage usage' },
+    { id: 'sharepoint',         label: 'SharePoint Sites',      icon: Globe,      description: 'Discover all SharePoint sites with storage details' },
+    { id: 'teams',              label: 'Microsoft Teams',       icon: Users,      description: 'Discover all Teams with member and channel counts' },
+    { id: 'distributiongroups', label: 'Distribution Groups',   icon: AtSign,     description: 'Discover all mail-enabled distribution lists' },
+    { id: 'sharedmailboxes',    label: 'Shared Mailboxes',      icon: Inbox,      description: 'Discover all shared mailboxes in the source tenant' },
+    { id: 'm365groups',         label: 'M365 Groups',           icon: Building2,  description: 'Discover all Microsoft 365 Groups with members and owners' },
+    { id: 'powerplatform',      label: 'Power Platform',        icon: Zap,        description: 'Discover Power Apps and Power Automate flows' },
   ];
 
   const handleDiscover = async () => {
@@ -1089,13 +1101,15 @@ function DiscoveryTab({ projectId, onImport }: DiscoveryTabProps) {
           : activeType === 'onedrive' ? 'onedrive'
           : activeType === 'sharepoint' ? 'sharepoint'
           : activeType === 'teams' ? 'teams'
+          : activeType === 'distributiongroups' ? 'distributiongroup'
+          : activeType === 'sharedmailboxes' ? 'sharedmailbox'
+          : activeType === 'm365groups' ? 'm365group'
           : 'powerplatform';
         let sourceIdentity = '';
         let targetIdentity = '';
 
         if (activeType === 'users') {
           sourceIdentity = r.userPrincipalName;
-          // Use mapping rule result; if unchanged (no rule matched), fall back to targetSuffix
           const mapped = mappedTargets[sourceIdentity];
           if (mapped && mapped !== sourceIdentity) {
             targetIdentity = mapped;
@@ -1116,12 +1130,23 @@ function DiscoveryTab({ projectId, onImport }: DiscoveryTabProps) {
           if (mapped && mapped !== sourceIdentity) {
             targetIdentity = mapped;
           } else {
-            // Use display name as target — migration engine will find or create the site by name in the target tenant
             targetIdentity = r.displayName || r.webUrl.split('/sites/').pop()?.split('/')[0] || '';
           }
         } else if (activeType === 'teams') {
           sourceIdentity = r.id;
           targetIdentity = r.displayName;
+        } else if (activeType === 'distributiongroups' || activeType === 'm365groups') {
+          // Use mail address as identity; target defaults to same displayName (engine will match/create by name)
+          sourceIdentity = r.mail || r.displayName;
+          targetIdentity = r.displayName;
+        } else if (activeType === 'sharedmailboxes') {
+          sourceIdentity = r.userPrincipalName;
+          const mapped = mappedTargets[sourceIdentity];
+          if (mapped && mapped !== sourceIdentity) {
+            targetIdentity = mapped;
+          } else if (targetSuffix) {
+            targetIdentity = sourceIdentity.replace(/@.*/, `@${targetSuffix}`);
+          }
         } else {
           sourceIdentity = r.id;
           targetIdentity = '';
@@ -1315,6 +1340,56 @@ function DiscoveryResultRow({ item, type, selected, onToggle }: { item: any; typ
         <div className="text-xs text-muted-foreground text-right">
           <div>{item.memberCount} members</div>
           <div>{item.channelCount} channels</div>
+        </div>
+      </div>
+    );
+  }
+
+  if (type === 'distributiongroups') {
+    return (
+      <div className={`flex items-center gap-3 px-4 py-3 hover:bg-muted/30 transition-colors cursor-pointer ${selected ? 'bg-primary/5' : ''}`} onClick={onToggle} data-testid={`row-dg-${item.id}`}>
+        <input type="checkbox" checked={selected} onChange={() => {}} className="rounded" />
+        <AtSign className="w-4 h-4 flex-shrink-0 text-orange-500" />
+        <div className="flex-1 min-w-0">
+          <div className="font-medium text-sm truncate">{item.displayName}</div>
+          <div className="text-xs text-muted-foreground truncate">{item.mail || 'No email address'}</div>
+        </div>
+        <div className="text-xs text-muted-foreground text-right">
+          <div>{item.memberCount} members</div>
+          <div>{item.ownerCount} owners</div>
+        </div>
+      </div>
+    );
+  }
+
+  if (type === 'sharedmailboxes') {
+    return (
+      <div className={`flex items-center gap-3 px-4 py-3 hover:bg-muted/30 transition-colors cursor-pointer ${selected ? 'bg-primary/5' : ''}`} onClick={onToggle} data-testid={`row-sm-${item.id}`}>
+        <input type="checkbox" checked={selected} onChange={() => {}} className="rounded" />
+        <Inbox className="w-4 h-4 flex-shrink-0 text-rose-500" />
+        <div className="flex-1 min-w-0">
+          <div className="font-medium text-sm truncate">{item.displayName}</div>
+          <div className="text-xs text-muted-foreground truncate">{item.userPrincipalName}</div>
+        </div>
+        <div className="text-xs text-muted-foreground text-right">
+          <div>{item.mail || 'No mail'}</div>
+        </div>
+      </div>
+    );
+  }
+
+  if (type === 'm365groups') {
+    return (
+      <div className={`flex items-center gap-3 px-4 py-3 hover:bg-muted/30 transition-colors cursor-pointer ${selected ? 'bg-primary/5' : ''}`} onClick={onToggle} data-testid={`row-m365g-${item.id}`}>
+        <input type="checkbox" checked={selected} onChange={() => {}} className="rounded" />
+        <Building2 className="w-4 h-4 flex-shrink-0 text-cyan-500" />
+        <div className="flex-1 min-w-0">
+          <div className="font-medium text-sm truncate">{item.displayName}</div>
+          <div className="text-xs text-muted-foreground truncate">{item.mail || 'No email'}</div>
+        </div>
+        <div className="text-xs text-muted-foreground text-right">
+          <div>{item.memberCount} members · {item.ownerCount} owners</div>
+          <div className="capitalize text-muted-foreground/70">{item.visibility || 'Private'}</div>
         </div>
       </div>
     );

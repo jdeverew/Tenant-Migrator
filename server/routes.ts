@@ -7,7 +7,7 @@ import { z } from "zod";
 import type { Project } from "@shared/schema";
 import { migrateItem, migrateAllPending } from "./services/migration-engine";
 import { GraphClient } from "./services/graph-client";
-import { discoverUsers, discoverSharePointSites, discoverTeams, discoverPowerPlatform, discoverOneDrives } from "./services/discovery-service";
+import { discoverUsers, discoverSharePointSites, discoverTeams, discoverPowerPlatform, discoverOneDrives, discoverDistributionGroups, discoverSharedMailboxes, discoverM365Groups } from "./services/discovery-service";
 import { discoverCloudOnlyUsers, testAdConnection, migrateUserToAd, generatePowerShellScript, type AdConnectionConfig } from "./services/entra-ad-service";
 import { buildConnectUrl, handleOAuthCallback, buildConsentUrl, SERVICE_PERMISSION_GROUPS, type ServiceKey } from "./services/oauth-tenant-service";
 
@@ -276,6 +276,9 @@ export async function registerRoutes(
         case 'sharepoint': data = await discoverSharePointSites(source); break;
         case 'teams': data = await discoverTeams(source); break;
         case 'powerplatform': data = await discoverPowerPlatform(source); break;
+        case 'distributiongroups': data = await discoverDistributionGroups(source); break;
+        case 'sharedmailboxes': data = await discoverSharedMailboxes(source); break;
+        case 'm365groups': data = await discoverM365Groups(source); break;
         default: return res.status(400).json({ message: `Unknown discovery type: ${type}` });
       }
 
