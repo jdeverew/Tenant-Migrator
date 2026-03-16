@@ -80,7 +80,25 @@ export default function ProjectDetails() {
   const [logsDialogItem, setLogsDialogItem] = useState<MigrationItem | null>(null);
   const [itemLogs, setItemLogs] = useState<string[]>([]);
   const [logsLoading, setLogsLoading] = useState(false);
+  const [selectedServiceItems, setSelectedServiceItems] = useState<Set<number>>(new Set());
+  const [isDeletingSelected, setIsDeletingSelected] = useState(false);
   const { toast } = useToast();
+
+  const handleDeleteSelected = async (svcItemIds: number[]) => {
+    const toDelete = svcItemIds.filter(id => selectedServiceItems.has(id));
+    if (toDelete.length === 0) return;
+    if (!confirm(`Delete ${toDelete.length} item(s)? This cannot be undone.`)) return;
+    setIsDeletingSelected(true);
+    try {
+      await Promise.all(toDelete.map(itemId => deleteItem({ id: itemId, projectId: id })));
+      setSelectedServiceItems(prev => { const next = new Set(prev); toDelete.forEach(i => next.delete(i)); return next; });
+      toast({ title: "Deleted", description: `${toDelete.length} item(s) removed.` });
+    } catch {
+      toast({ title: "Error", description: "Failed to delete some items.", variant: "destructive" });
+    } finally {
+      setIsDeletingSelected(false);
+    }
+  };
 
   // Show toast after OAuth redirect back from Microsoft
   useEffect(() => {
@@ -436,7 +454,13 @@ export default function ProjectDetails() {
                           <p className="text-sm text-muted-foreground">{description}</p>
                         </div>
                       </div>
-                      <div className="flex gap-2 flex-shrink-0">
+                      <div className="flex gap-2 flex-shrink-0 flex-wrap">
+                        {selectedServiceItems.size > 0 && svcItems.some(i => selectedServiceItems.has(i.id)) && (
+                          <Button variant="destructive" size="sm" disabled={isDeletingSelected} onClick={() => handleDeleteSelected(svcItems.map(i => i.id))} data-testid={`button-delete-selected-${key}`}>
+                            {isDeletingSelected ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <Trash2 className="w-4 h-4 mr-2" />}
+                            Delete {svcItems.filter(i => selectedServiceItems.has(i.id)).length} selected
+                          </Button>
+                        )}
                         {pending > 0 && (
                           <Button onClick={async () => {
                             try {
@@ -485,6 +509,23 @@ export default function ProjectDetails() {
                         <table className="w-full text-sm">
                           <thead>
                             <tr className="bg-muted/30 border-b border-border/60">
+                              <th className="px-3 py-3 w-10">
+                                <input
+                                  type="checkbox"
+                                  className="rounded border-border"
+                                  data-testid={`checkbox-select-all-${key}`}
+                                  checked={svcItems.length > 0 && svcItems.filter(i => i.status !== 'in_progress').every(i => selectedServiceItems.has(i.id))}
+                                  onChange={e => {
+                                    const deletable = svcItems.filter(i => i.status !== 'in_progress').map(i => i.id);
+                                    setSelectedServiceItems(prev => {
+                                      const next = new Set(prev);
+                                      if (e.target.checked) deletable.forEach(i => next.add(i));
+                                      else deletable.forEach(i => next.delete(i));
+                                      return next;
+                                    });
+                                  }}
+                                />
+                              </th>
                               <th className="px-5 py-3 text-left font-semibold text-muted-foreground">Source</th>
                               <th className="px-5 py-3 text-left font-semibold text-muted-foreground">Target</th>
                               <th className="px-5 py-3 text-left font-semibold text-muted-foreground w-52">Status</th>
@@ -496,8 +537,23 @@ export default function ProjectDetails() {
                             {svcItems.map((item: MigrationItem) => {
                               const hasBytesData = item.bytesTotal != null && item.bytesTotal > 0;
                               const pct = item.progressPercent ?? 0;
+                              const isSelected = selectedServiceItems.has(item.id);
                               return (
-                              <tr key={item.id} className={`hover:bg-muted/20 ${item.status === 'in_progress' ? 'bg-blue-50/40 dark:bg-blue-950/20' : ''}`} data-testid={`row-item-${item.id}`}>
+                              <tr key={item.id} className={`hover:bg-muted/20 ${item.status === 'in_progress' ? 'bg-blue-50/40 dark:bg-blue-950/20' : ''} ${isSelected ? 'bg-red-50/30 dark:bg-red-950/20' : ''}`} data-testid={`row-item-${item.id}`}>
+                                <td className="px-3 py-3.5">
+                                  <input
+                                    type="checkbox"
+                                    className="rounded border-border"
+                                    disabled={item.status === 'in_progress'}
+                                    checked={isSelected}
+                                    data-testid={`checkbox-item-${item.id}`}
+                                    onChange={e => setSelectedServiceItems(prev => {
+                                      const next = new Set(prev);
+                                      if (e.target.checked) next.add(item.id); else next.delete(item.id);
+                                      return next;
+                                    })}
+                                  />
+                                </td>
                                 <td className="px-5 py-3.5 font-medium" data-testid={`text-source-${item.id}`}>{item.sourceIdentity}</td>
                                 <td className="px-5 py-3.5 text-muted-foreground text-sm" data-testid={`text-target-${item.id}`}>{item.targetIdentity || 'Auto-mapped'}</td>
                                 <td className="px-5 py-3.5">
