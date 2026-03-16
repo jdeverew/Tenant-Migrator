@@ -448,14 +448,26 @@ async function migrateDriveItemsRecursive(
       await updateItemProgress(itemId, 'in_progress', logs, undefined, counters);
 
       try {
+        // Create the folder in the target drive.
+        // Correct endpoint: POST to parent's :/children, with { name, folder: {} }
+        // targetParentPath = "" means we're at drive root, so use /root/children.
+        // targetParentPath = "/Foo" means POST to /root:/Foo:/children.
+        const folderCreateEndpoint = targetParentPath
+          ? `/drives/${targetDriveId}/root:${targetParentPath}:/children`
+          : `/drives/${targetDriveId}/root/children`;
+
         try {
-          await target.post(`/drives/${targetDriveId}/root:${targetParentPath}/${item.name}:/children`, {
-            name: ".",
+          await target.post(folderCreateEndpoint, {
+            name: item.name,
             folder: {},
             "@microsoft.graph.conflictBehavior": "replace",
           });
-        } catch {
-          // may fail if folder exists — that's ok
+          logs.push(logEntry(`  Created folder: ${targetParentPath}/${item.name}`));
+        } catch (folderErr: any) {
+          // A 409 Conflict means the folder already exists — that's fine.
+          if (!folderErr.message?.includes('409') && !folderErr.message?.toLowerCase().includes('nameAlreadyExists')) {
+            logs.push(logEntry(`  Folder "${item.name}" creation warning: ${folderErr.message} (will still attempt to recurse into it)`));
+          }
         }
 
         await migrateDriveItemsRecursive(
@@ -664,8 +676,10 @@ async function migrateOneDrive(
     const sourceDrive = await resolveUserDrive(source, sourceUserId, sourceUser);
     const targetDrive = await resolveUserDrive(target, targetUserId, targetUser);
 
+    // quota.used can include deleted items (recycle bin), so it may overstate the actual bytes to migrate.
+    // We use it as the initial estimate and update bytesTotal as we discover the actual files.
     const bytesTotal = sourceDrive.quota?.used || 0;
-    logs.push(logEntry(`Source drive: ${sourceDrive.id} | Size: ${formatBytes(bytesTotal)}`));
+    logs.push(logEntry(`Source drive: ${sourceDrive.id} | Quota used: ${formatBytes(bytesTotal)}`));
     logs.push(logEntry(`Target drive: ${targetDrive.id}`));
     await updateItemProgress(itemId, 'in_progress', logs, undefined, { bytesMigrated: 0, bytesTotal });
 
