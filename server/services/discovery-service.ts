@@ -153,6 +153,51 @@ export async function discoverTeams(client: GraphClient): Promise<DiscoveredTeam
   return results;
 }
 
+export interface DiscoveredOneDrive {
+  id: string;
+  displayName: string;
+  userPrincipalName: string;
+  storageUsedBytes: number | null;
+  storageAllocatedBytes: number | null;
+  webUrl: string | null;
+  lastModified: string | null;
+}
+
+export async function discoverOneDrives(client: GraphClient): Promise<DiscoveredOneDrive[]> {
+  const users = await client.getAllPages<any>(
+    `/users?$select=id,displayName,userPrincipalName,assignedLicenses&$top=999`
+  );
+
+  const licensedUsers = users.filter((u: any) =>
+    u.userPrincipalName &&
+    !u.userPrincipalName.includes('#EXT#') &&
+    (u.assignedLicenses || []).length > 0
+  );
+
+  const results: DiscoveredOneDrive[] = [];
+
+  for (const user of licensedUsers) {
+    try {
+      const drive = await client.get(`/users/${user.id}/drive`);
+      if (drive?.id) {
+        results.push({
+          id: user.id,
+          displayName: user.displayName || user.userPrincipalName,
+          userPrincipalName: user.userPrincipalName,
+          storageUsedBytes: drive.quota?.used ?? null,
+          storageAllocatedBytes: drive.quota?.total ?? null,
+          webUrl: drive.webUrl ?? null,
+          lastModified: drive.lastModifiedDateTime ?? null,
+        });
+      }
+    } catch {
+      // User has no OneDrive provisioned — skip
+    }
+  }
+
+  return results;
+}
+
 export async function discoverPowerPlatform(_client: GraphClient): Promise<DiscoveredPowerPlatformItem[]> {
   // Power Platform uses separate APIs (api.powerapps.com, api.flow.microsoft.com)
   // These are not accessible via standard Microsoft Graph API with client credentials

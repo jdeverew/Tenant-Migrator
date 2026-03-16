@@ -3,7 +3,7 @@ import { useProject, useProjectStats, useUpdateProject } from "@/hooks/use-proje
 import { useMigrationItems, useCreateMigrationItem, useUpdateMigrationItem, useDeleteMigrationItem } from "@/hooks/use-items";
 import { Sidebar } from "@/components/Sidebar";
 import { StatusBadge } from "@/components/StatusBadge";
-import { Loader2, ArrowLeft, Mail, Cloud, Users, Plus, Trash2, RotateCw, Eye, EyeOff, CheckCircle2, XCircle, Shield, ExternalLink, Play, PlayCircle, FileText, Globe, KeyRound, Search, UserCheck, MapPin, Zap, AlertTriangle, Import, Boxes, Server, Download, Terminal, Wand2, Copy, Sparkles } from "lucide-react";
+import { Loader2, ArrowLeft, Mail, Cloud, Users, Plus, Trash2, RotateCw, Eye, EyeOff, CheckCircle2, XCircle, Shield, ExternalLink, Play, PlayCircle, FileText, Globe, KeyRound, Search, UserCheck, MapPin, Zap, AlertTriangle, Import, Boxes, Server, Download, Terminal, Wand2, Copy, Sparkles, HardDrive, RefreshCw } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip } from "recharts";
@@ -1002,7 +1002,7 @@ function TenantCredentialForm({
 
 // ======================== DISCOVERY TAB ========================
 
-type DiscoveryType = 'users' | 'sharepoint' | 'teams' | 'powerplatform';
+type DiscoveryType = 'users' | 'onedrive' | 'sharepoint' | 'teams' | 'powerplatform';
 
 interface DiscoveryTabProps {
   projectId: number;
@@ -1016,13 +1016,15 @@ function DiscoveryTab({ projectId, onImport }: DiscoveryTabProps) {
   const [results, setResults] = useState<any[]>([]);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [targetSuffix, setTargetSuffix] = useState('');
+  const [lastRunAt, setLastRunAt] = useState<Date | null>(null);
   const { toast } = useToast();
 
   const discoveryTypes: { id: DiscoveryType; label: string; icon: any; description: string }[] = [
-    { id: 'users', label: 'Users', icon: UserCheck, description: 'Discover all licensed users with mailbox or OneDrive' },
-    { id: 'sharepoint', label: 'SharePoint Sites', icon: Globe, description: 'Discover all SharePoint sites with storage details' },
-    { id: 'teams', label: 'Microsoft Teams', icon: Users, description: 'Discover all Teams with member and channel counts' },
-    { id: 'powerplatform', label: 'Power Platform', icon: Zap, description: 'Discover Power Apps and Power Automate flows' },
+    { id: 'users',         label: 'Users',            icon: UserCheck,  description: 'Discover all licensed users with mailbox or OneDrive' },
+    { id: 'onedrive',      label: 'OneDrive',         icon: HardDrive,  description: 'Discover all provisioned OneDrive accounts with storage usage' },
+    { id: 'sharepoint',    label: 'SharePoint Sites', icon: Globe,      description: 'Discover all SharePoint sites with storage details' },
+    { id: 'teams',         label: 'Microsoft Teams',  icon: Users,      description: 'Discover all Teams with member and channel counts' },
+    { id: 'powerplatform', label: 'Power Platform',   icon: Zap,        description: 'Discover Power Apps and Power Automate flows' },
   ];
 
   const handleDiscover = async () => {
@@ -1034,6 +1036,7 @@ function DiscoveryTab({ projectId, onImport }: DiscoveryTabProps) {
       const res = await apiRequest('GET', `/api/projects/${projectId}/discover/${activeType}`);
       const data = await res.json();
       setResults(data.data || []);
+      setLastRunAt(new Date());
     } catch (err: any) {
       setError(err.message || 'Discovery failed. Check source tenant credentials.');
     } finally {
@@ -1066,7 +1069,7 @@ function DiscoveryTab({ projectId, onImport }: DiscoveryTabProps) {
     try {
       // Build source identities for mapping
       const sourceIdentities = selectedItems.map(r => {
-        if (activeType === 'users') return r.userPrincipalName;
+        if (activeType === 'users' || activeType === 'onedrive') return r.userPrincipalName;
         if (activeType === 'sharepoint') return r.webUrl;
         return r.id;
       });
@@ -1082,13 +1085,25 @@ function DiscoveryTab({ projectId, onImport }: DiscoveryTabProps) {
       }
 
       const items = selectedItems.map(r => {
-        const itemType = activeType === 'users' ? 'user' : activeType === 'sharepoint' ? 'sharepoint' : activeType === 'teams' ? 'teams' : 'powerplatform';
+        const itemType = activeType === 'users' ? 'user'
+          : activeType === 'onedrive' ? 'onedrive'
+          : activeType === 'sharepoint' ? 'sharepoint'
+          : activeType === 'teams' ? 'teams'
+          : 'powerplatform';
         let sourceIdentity = '';
         let targetIdentity = '';
 
         if (activeType === 'users') {
           sourceIdentity = r.userPrincipalName;
           // Use mapping rule result; if unchanged (no rule matched), fall back to targetSuffix
+          const mapped = mappedTargets[sourceIdentity];
+          if (mapped && mapped !== sourceIdentity) {
+            targetIdentity = mapped;
+          } else if (targetSuffix) {
+            targetIdentity = sourceIdentity.replace(/@.*/, `@${targetSuffix}`);
+          }
+        } else if (activeType === 'onedrive') {
+          sourceIdentity = r.userPrincipalName;
           const mapped = mappedTargets[sourceIdentity];
           if (mapped && mapped !== sourceIdentity) {
             targetIdentity = mapped;
@@ -1139,7 +1154,7 @@ function DiscoveryTab({ projectId, onImport }: DiscoveryTabProps) {
                 <button
                   key={t.id}
                   data-testid={`button-discover-${t.id}`}
-                  onClick={() => { setActiveType(t.id); setResults([]); setError(null); setSelected(new Set()); }}
+                  onClick={() => { setActiveType(t.id); setResults([]); setError(null); setSelected(new Set()); setLastRunAt(null); }}
                   className={`flex flex-col items-center gap-2 p-4 rounded-lg border-2 transition-all text-sm font-medium ${
                     activeType === t.id
                       ? 'border-primary bg-primary/5 text-primary'
@@ -1156,7 +1171,7 @@ function DiscoveryTab({ projectId, onImport }: DiscoveryTabProps) {
           <div className="text-sm text-muted-foreground">{activeTypeConfig.description}</div>
 
           <div className="flex flex-wrap gap-3 items-end">
-            {(activeType === 'users') && (
+            {(activeType === 'users' || activeType === 'onedrive') && (
               <div className="space-y-1 flex-1 min-w-[200px]">
                 <Label>Fallback target domain <span className="text-muted-foreground font-normal">(used only if no mapping rule matches)</span></Label>
                 <Input
@@ -1167,10 +1182,22 @@ function DiscoveryTab({ projectId, onImport }: DiscoveryTabProps) {
                 />
               </div>
             )}
-            <Button onClick={handleDiscover} disabled={loading} data-testid="button-run-discovery">
-              {loading ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : <Search className="w-4 h-4 mr-2" />}
-              {loading ? 'Discovering...' : `Discover ${activeTypeConfig.label}`}
-            </Button>
+            <div className="flex flex-col items-start gap-1">
+              <Button onClick={handleDiscover} disabled={loading} data-testid="button-run-discovery"
+                variant={lastRunAt ? 'outline' : 'default'}>
+                {loading
+                  ? <><Loader2 className="w-4 h-4 animate-spin mr-2" />Discovering...</>
+                  : lastRunAt
+                    ? <><RefreshCw className="w-4 h-4 mr-2" />Rerun Discovery</>
+                    : <><Search className="w-4 h-4 mr-2" />Discover {activeTypeConfig.label}</>
+                }
+              </Button>
+              {lastRunAt && !loading && (
+                <span className="text-xs text-muted-foreground">
+                  Last run: {lastRunAt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                </span>
+              )}
+            </div>
           </div>
 
           {error && (
@@ -1217,6 +1244,28 @@ function DiscoveryTab({ projectId, onImport }: DiscoveryTabProps) {
 }
 
 function DiscoveryResultRow({ item, type, selected, onToggle }: { item: any; type: DiscoveryType; selected: boolean; onToggle: () => void }) {
+  if (type === 'onedrive') {
+    return (
+      <div className={`flex items-center gap-3 px-4 py-3 hover:bg-muted/30 transition-colors cursor-pointer ${selected ? 'bg-primary/5' : ''}`} onClick={onToggle} data-testid={`row-onedrive-${item.id}`}>
+        <input type="checkbox" checked={selected} onChange={() => {}} className="rounded" />
+        <HardDrive className="w-4 h-4 flex-shrink-0 text-blue-500" />
+        <div className="flex-1 min-w-0">
+          <div className="font-medium text-sm truncate">{item.displayName}</div>
+          <div className="text-xs text-muted-foreground truncate">{item.userPrincipalName}</div>
+        </div>
+        <div className="text-xs text-muted-foreground text-right">
+          {item.storageUsedBytes != null && (
+            <div>{formatBytes(item.storageUsedBytes)} used</div>
+          )}
+          {item.storageAllocatedBytes != null && (
+            <div className="text-muted-foreground/60">of {formatBytes(item.storageAllocatedBytes)}</div>
+          )}
+          {item.storageUsedBytes == null && <div>Storage unknown</div>}
+        </div>
+      </div>
+    );
+  }
+
   if (type === 'users') {
     return (
       <div className={`flex items-center gap-3 px-4 py-3 hover:bg-muted/30 transition-colors cursor-pointer ${selected ? 'bg-primary/5' : ''}`} onClick={onToggle} data-testid={`row-user-${item.id}`}>

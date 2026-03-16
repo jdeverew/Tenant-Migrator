@@ -7,7 +7,7 @@ import { z } from "zod";
 import type { Project } from "@shared/schema";
 import { migrateItem, migrateAllPending } from "./services/migration-engine";
 import { GraphClient } from "./services/graph-client";
-import { discoverUsers, discoverSharePointSites, discoverTeams, discoverPowerPlatform } from "./services/discovery-service";
+import { discoverUsers, discoverSharePointSites, discoverTeams, discoverPowerPlatform, discoverOneDrives } from "./services/discovery-service";
 import { discoverCloudOnlyUsers, testAdConnection, migrateUserToAd, generatePowerShellScript, type AdConnectionConfig } from "./services/entra-ad-service";
 import { buildConnectUrl, handleOAuthCallback, buildConsentUrl, SERVICE_PERMISSION_GROUPS, type ServiceKey } from "./services/oauth-tenant-service";
 
@@ -272,6 +272,7 @@ export async function registerRoutes(
       let data: any;
       switch (type) {
         case 'users': data = await discoverUsers(source); break;
+        case 'onedrive': data = await discoverOneDrives(source); break;
         case 'sharepoint': data = await discoverSharePointSites(source); break;
         case 'teams': data = await discoverTeams(source); break;
         case 'powerplatform': data = await discoverPowerPlatform(source); break;
