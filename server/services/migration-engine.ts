@@ -722,7 +722,7 @@ async function migrateTeam(
 }
 
 export async function migrateItem(projectId: number, itemId: number): Promise<void> {
-  const project = await storage.getProject(projectId);
+  const project = await storage.getProjectInternal(projectId);
   if (!project) throw new Error("Project not found");
 
   const item = await storage.getItem(itemId);
@@ -775,7 +775,7 @@ export async function migrateItem(projectId: number, itemId: number): Promise<vo
 }
 
 export async function migrateAllPending(projectId: number): Promise<{ started: number; skipped: number; errors: string[] }> {
-  const project = await storage.getProject(projectId);
+  const project = await storage.getProjectInternal(projectId);
   if (!project) throw new Error("Project not found");
 
   getGraphClients(project);
