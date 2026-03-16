@@ -180,6 +180,84 @@ export async function registerRoutes(
     res.json({ logs: item.logs || [] });
   });
 
+  // === Export migration logs for a project ===
+  app.get('/api/projects/:projectId/export-logs', requireAuth, async (req, res) => {
+    try {
+      const userId = getSessionUserId(req);
+      const projectId = Number(req.params.projectId);
+      const project = await storage.getProject(projectId, userId);
+      if (!project) return res.status(404).json({ message: 'Project not found' });
+
+      const items = await storage.getItems(projectId);
+      const fmt = (req.query.format as string || 'txt').toLowerCase();
+
+      if (fmt === 'csv') {
+        const escape = (v: string) => `"${(v || '').replace(/"/g, '""')}"`;
+        const rows = [
+          ['Type', 'Source Identity', 'Target Identity', 'Status', 'Error', 'Updated At', 'Log Lines'].map(escape).join(','),
+          ...items.map(i => [
+            i.itemType,
+            i.sourceIdentity,
+            i.targetIdentity || '',
+            i.status,
+            i.errorDetails || '',
+            i.updatedAt ? new Date(i.updatedAt).toISOString() : '',
+            (i.logs || []).join(' | '),
+          ].map(escape).join(',')),
+        ];
+        res.setHeader('Content-Type', 'text/csv');
+        res.setHeader('Content-Disposition', `attachment; filename="migration-logs-${projectId}-${Date.now()}.csv"`);
+        return res.send(rows.join('\r\n'));
+      }
+
+      // Default: plain text
+      const sep = '='.repeat(80);
+      const thin = '-'.repeat(80);
+      const lines: string[] = [
+        sep,
+        `M365 TENANT MIGRATION LOG EXPORT`,
+        `Project : ${project.name}`,
+        `Exported: ${new Date().toISOString()}`,
+        `Items   : ${items.length} total, ${items.filter(i => i.status === 'failed').length} failed, ${items.filter(i => i.status === 'completed').length} completed`,
+        sep,
+        '',
+      ];
+
+      const typeOrder = ['mailbox','onedrive','sharepoint','teams','user','distributiongroup','sharedmailbox','m365group','powerplatform','entriad'];
+      const sorted = [...items].sort((a, b) => typeOrder.indexOf(a.itemType) - typeOrder.indexOf(b.itemType));
+
+      for (const item of sorted) {
+        lines.push(sep);
+        lines.push(`[${item.itemType.toUpperCase()}] ${item.sourceIdentity}${item.targetIdentity ? ` → ${item.targetIdentity}` : ''}`);
+        lines.push(`Status : ${item.status.toUpperCase()}`);
+        if (item.updatedAt) lines.push(`Updated: ${new Date(item.updatedAt).toISOString()}`);
+        if (item.errorDetails) {
+          lines.push(`Error  : ${item.errorDetails}`);
+        }
+        if ((item.logs || []).length > 0) {
+          lines.push(thin);
+          lines.push('LOGS:');
+          for (const entry of item.logs!) {
+            lines.push(`  ${entry}`);
+          }
+        } else {
+          lines.push(`(no logs recorded)`);
+        }
+        lines.push('');
+      }
+
+      lines.push(sep);
+      lines.push(`END OF REPORT`);
+      lines.push(sep);
+
+      res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+      res.setHeader('Content-Disposition', `attachment; filename="migration-logs-${projectId}-${Date.now()}.txt"`);
+      return res.send(lines.join('\n'));
+    } catch (err: any) {
+      res.status(500).json({ message: err.message || 'Export failed' });
+    }
+  });
+
   // === Test Connection ===
   app.post('/api/projects/:id/test-connection', requireAuth, async (req, res) => {
     const userId = getSessionUserId(req);

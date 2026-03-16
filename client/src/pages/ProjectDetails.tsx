@@ -199,6 +199,22 @@ export default function ProjectDetails() {
     }
   };
 
+  const handleExportLogs = async (format: 'txt' | 'csv' = 'txt') => {
+    try {
+      const res = await fetch(`/api/projects/${id}/export-logs?format=${format}`, { credentials: 'include' });
+      if (!res.ok) throw new Error(`Export failed: ${res.statusText}`);
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `migration-logs-${id}-${Date.now()}.${format}`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (err: any) {
+      toast({ title: 'Export failed', description: err.message, variant: 'destructive' });
+    }
+  };
+
   const handleMigrateAll = async () => {
     try {
       const res = await apiRequest('POST', `/api/projects/${id}/migrate-all`);
@@ -361,6 +377,19 @@ export default function ProjectDetails() {
               {/* Overview */}
               {currentView === 'overview' && (
                 <div className="space-y-6">
+                  {/* Export toolbar */}
+                  {items && items.length > 0 && (
+                    <div className="flex items-center gap-2 p-3 rounded-lg bg-muted/50 border border-border">
+                      <Download className="w-4 h-4 text-muted-foreground flex-shrink-0" />
+                      <span className="text-sm font-medium flex-1">Export migration logs</span>
+                      <Button variant="outline" size="sm" onClick={() => handleExportLogs('txt')} data-testid="button-export-logs-txt">
+                        <Download className="w-3.5 h-3.5 mr-1.5" /> Plain text (.txt)
+                      </Button>
+                      <Button variant="outline" size="sm" onClick={() => handleExportLogs('csv')} data-testid="button-export-logs-csv">
+                        <Download className="w-3.5 h-3.5 mr-1.5" /> Spreadsheet (.csv)
+                      </Button>
+                    </div>
+                  )}
                   <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
                     {[
                       { label: 'Total Items', value: stats?.total || 0, color: '' },
@@ -489,6 +518,16 @@ export default function ProjectDetails() {
                         }} data-testid={`button-add-${key}`}>
                           <Plus className="w-4 h-4 mr-2" /> Add Item
                         </Button>
+                        {svcItems.length > 0 && (
+                          <>
+                            <Button variant="ghost" size="sm" onClick={() => handleExportLogs('txt')} title="Export logs as plain text" data-testid={`button-export-txt-${key}`}>
+                              <Download className="w-4 h-4 mr-1" /> .txt
+                            </Button>
+                            <Button variant="ghost" size="sm" onClick={() => handleExportLogs('csv')} title="Export logs as CSV (Excel)" data-testid={`button-export-csv-${key}`}>
+                              <Download className="w-4 h-4 mr-1" /> .csv
+                            </Button>
+                          </>
+                        )}
                       </div>
                     </div>
 
