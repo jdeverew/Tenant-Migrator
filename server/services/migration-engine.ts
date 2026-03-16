@@ -458,35 +458,76 @@ async function migrateSharePoint(
     return identity;
   }
 
-  async function resolveSite(client: GraphClient, identity: string, label: string): Promise<any> {
-    // Try 1: hostname:/path format (canonical Graph API format)
+  async function resolveSite(client: GraphClient, identity: string): Promise<any | null> {
+    // Try 1: hostname:/path format (canonical Graph API format for full URLs)
     const graphPath = toGraphSitePath(identity);
-    try {
-      return await client.get(`/sites/${graphPath}`);
-    } catch { /* try next */ }
+    if (graphPath.includes(':')) {
+      try { return await client.get(`/sites/${graphPath}`); } catch { /* try next */ }
+    }
 
-    // Try 2: search by display name or keyword
+    // Try 2: search by keyword/display name
     try {
-      const keyword = graphPath.split('/').pop() || identity;
+      const keyword = graphPath.split('/').pop()?.split(':').pop() || identity;
       const searchResult = await client.get(`/sites?search=${encodeURIComponent(keyword)}`);
       if (searchResult.value?.length > 0) return searchResult.value[0];
     } catch { /* try next */ }
 
-    throw new Error(
-      `${label} SharePoint site "${identity}" not found. ` +
-      `Ensure the site exists and the app has Sites.ReadWrite.All permission.`
-    );
+    return null;
+  }
+
+  async function resolveOrCreateTargetSite(displayName: string): Promise<any> {
+    // Try finding existing site by display name
+    const existing = await resolveSite(target, displayName);
+    if (existing) return existing;
+
+    logs.push(logEntry(`Target site "${displayName}" not found — creating new Team site in target tenant...`));
+    await updateItemProgress(itemId, 'in_progress', logs);
+
+    // Create via M365 Group, which automatically provisions a SharePoint Team site
+    const mailNickname = displayName.toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 59) || 'migrated';
+    const group = await target.post('/groups', {
+      displayName,
+      mailNickname,
+      groupTypes: ['Unified'],
+      mailEnabled: true,
+      securityEnabled: false,
+      visibility: 'Private',
+    });
+
+    logs.push(logEntry(`M365 Group created (id: ${group.id}) — waiting for SharePoint site to provision...`));
+    await updateItemProgress(itemId, 'in_progress', logs);
+
+    // Poll for site to be provisioned (can take up to 30s)
+    for (let i = 0; i < 12; i++) {
+      await new Promise(r => setTimeout(r, 5000));
+      try {
+        const site = await target.get(`/groups/${group.id}/sites/root`);
+        if (site?.id) {
+          logs.push(logEntry(`✓ Target site provisioned: ${site.webUrl}`));
+          return site;
+        }
+      } catch { /* not ready yet */ }
+    }
+    throw new Error(`Timed out waiting for SharePoint site to provision for group "${displayName}"`);
   }
 
   try {
     logs.push(logEntry("Resolving source SharePoint site..."));
     await updateItemProgress(itemId, 'in_progress', logs);
 
-    const sourceSite = await resolveSite(source, sourceIdentity, 'Source');
+    const sourceSite = await resolveSite(source, sourceIdentity);
+    if (!sourceSite) {
+      throw new Error(
+        `Source SharePoint site "${sourceIdentity}" not found. ` +
+        `Ensure the site exists and the app has Sites.ReadWrite.All permission.`
+      );
+    }
     logs.push(logEntry(`Found source site: ${sourceSite.displayName} (${sourceSite.id})`));
 
     logs.push(logEntry("Resolving target SharePoint site..."));
-    const targetSite = await resolveSite(target, targetIdentity || sourceIdentity, 'Target');
+    // targetIdentity is the display name; fall back to source display name if blank
+    const targetName = targetIdentity || sourceSite.displayName;
+    const targetSite = await resolveOrCreateTargetSite(targetName);
     logs.push(logEntry(`Found target site: ${targetSite.displayName} (${targetSite.id})`));
     await updateItemProgress(itemId, 'in_progress', logs);
 

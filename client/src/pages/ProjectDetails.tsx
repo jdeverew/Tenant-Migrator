@@ -1098,7 +1098,12 @@ function DiscoveryTab({ projectId, onImport }: DiscoveryTabProps) {
         } else if (activeType === 'sharepoint') {
           sourceIdentity = r.webUrl;
           const mapped = mappedTargets[sourceIdentity];
-          targetIdentity = (mapped && mapped !== sourceIdentity) ? mapped : (targetSuffix || '');
+          if (mapped && mapped !== sourceIdentity) {
+            targetIdentity = mapped;
+          } else {
+            // Use display name as target — migration engine will find or create the site by name in the target tenant
+            targetIdentity = r.displayName || r.webUrl.split('/sites/').pop()?.split('/')[0] || '';
+          }
         } else if (activeType === 'teams') {
           sourceIdentity = r.id;
           targetIdentity = r.displayName;
