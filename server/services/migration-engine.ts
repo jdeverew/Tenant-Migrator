@@ -2,6 +2,7 @@ import { GraphClient } from "./graph-client";
 import { storage } from "../storage";
 import type { Project, MigrationItem } from "@shared/schema";
 import { readMailboxDelegates, applyMailboxDelegates, createSharedMailboxDirect, type ExoConfig } from "./exo-runner";
+import { checkCancellation, CancelledError } from "./cancellation";
 
 function logEntry(message: string): string {
   return `[${new Date().toISOString()}] ${message}`;
@@ -130,6 +131,7 @@ async function migrateMailbox(
     let attachmentsFailed = 0;
 
     for (const folder of folders) {
+      checkCancellation(itemId);
       const folderName = folder.displayName;
       logs.push(logEntry(`Processing folder: ${folderName}`));
       await updateItemProgress(itemId, 'in_progress', logs);
@@ -167,6 +169,7 @@ async function migrateMailbox(
         await updateItemProgress(itemId, 'in_progress', logs);
 
         for (const msg of messages) {
+          checkCancellation(itemId);
           try {
             const newMessage: any = {
               subject: msg.subject || "(No Subject)",
@@ -441,6 +444,7 @@ async function migrateDriveItemsRecursive(
   const items = await source.getAllPages<any>(listPath);
 
   for (const item of items) {
+    checkCancellation(itemId);
     counters.total++;
 
     if (item.folder) {
@@ -1745,11 +1749,16 @@ export async function migrateItem(projectId: number, itemId: number): Promise<vo
         break;
     }
   } catch (err: any) {
-    await storage.updateItem(itemId, {
-      status: 'failed',
-      errorDetails: err.message,
-    });
-    await storage.updateItemLogs(itemId, [logEntry(`Migration failed: ${err.message}`)]);
+    if (err instanceof CancelledError) {
+      await storage.updateItem(itemId, { status: 'cancelled', errorDetails: null });
+      await storage.updateItemLogs(itemId, [logEntry('Migration was cancelled by user.')]);
+    } else {
+      await storage.updateItem(itemId, {
+        status: 'failed',
+        errorDetails: err.message,
+      });
+      await storage.updateItemLogs(itemId, [logEntry(`Migration failed: ${err.message}`)]);
+    }
   }
 }
 

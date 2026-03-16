@@ -3,7 +3,7 @@ import { useProject, useProjectStats, useUpdateProject } from "@/hooks/use-proje
 import { useMigrationItems, useCreateMigrationItem, useUpdateMigrationItem, useDeleteMigrationItem } from "@/hooks/use-items";
 import { Sidebar } from "@/components/Sidebar";
 import { StatusBadge } from "@/components/StatusBadge";
-import { Loader2, ArrowLeft, Mail, Cloud, Users, Plus, Trash2, RotateCw, Eye, EyeOff, CheckCircle2, XCircle, Shield, ExternalLink, Play, PlayCircle, FileText, Globe, KeyRound, Search, UserCheck, MapPin, Zap, AlertTriangle, Import, Boxes, Server, Download, Terminal, Wand2, Copy, Sparkles, HardDrive, RefreshCw, AtSign, Inbox, Building2 } from "lucide-react";
+import { Loader2, ArrowLeft, Mail, Cloud, Users, Plus, Trash2, RotateCw, Eye, EyeOff, CheckCircle2, XCircle, Shield, ExternalLink, Play, PlayCircle, FileText, Globe, KeyRound, Search, UserCheck, MapPin, Zap, AlertTriangle, Import, Boxes, Server, Download, Terminal, Wand2, Copy, Sparkles, HardDrive, RefreshCw, AtSign, Inbox, Building2, Square, Undo2 } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip } from "recharts";
@@ -187,7 +187,7 @@ export default function ProjectDetails() {
     }
   }, []);
 
-  const hasInProgress = items?.some(i => i.status === 'in_progress');
+  const hasInProgress = items?.some(i => i.status === 'in_progress' || i.status === 'reverting');
   useEffect(() => {
     if (!hasInProgress) return;
     const interval = setInterval(() => {
@@ -239,6 +239,40 @@ export default function ProjectDetails() {
       toast({ title: "Deleted", description: "Item removed from project" });
     } catch (error) {
       toast({ title: "Error", description: "Failed to delete item", variant: "destructive" });
+    }
+  };
+
+  const handleCancelItem = async (itemId: number) => {
+    if (!confirm("Stop this migration? It will halt at the next safe checkpoint and the item will be marked as cancelled. You can re-run it later.")) return;
+    try {
+      const res = await apiRequest('POST', `/api/projects/${id}/items/${itemId}/cancel`);
+      const data = await res.json();
+      toast({ title: "Cancellation Requested", description: data.message });
+      queryClient.invalidateQueries({ queryKey: [api.items.list.path, id] });
+    } catch (err: any) {
+      toast({ title: "Error", description: err.message || "Failed to cancel migration", variant: "destructive" });
+    }
+  };
+
+  const handleRevertItem = async (item: MigrationItem) => {
+    const typeLabel: Record<string, string> = {
+      user: 'user account', mailbox: 'mailbox user account', onedrive: 'all OneDrive files',
+      sharepoint: 'SharePoint site', teams: 'Teams team', distributiongroup: 'distribution group',
+      m365group: 'M365 group', sharedmailbox: 'shared mailbox', powerplatform: 'Power Platform resources',
+    };
+    const what = typeLabel[item.itemType] || item.itemType;
+    if (!confirm(
+      `⚠️ REVERT: This will permanently delete the ${what} "${item.targetIdentity || item.sourceIdentity}" from the TARGET tenant.\n\n` +
+      `This cannot be undone automatically. Deleted objects may be recoverable from the recycle bin for a limited time.\n\n` +
+      `Proceed with revert?`
+    )) return;
+    try {
+      const res = await apiRequest('POST', `/api/projects/${id}/items/${item.id}/revert`);
+      const data = await res.json();
+      toast({ title: "Revert Started", description: data.message });
+      queryClient.invalidateQueries({ queryKey: [api.items.list.path, id] });
+    } catch (err: any) {
+      toast({ title: "Revert Failed", description: err.message || "Failed to start revert", variant: "destructive" });
     }
   };
 
@@ -764,7 +798,7 @@ export default function ProjectDetails() {
                               const pct = item.progressPercent ?? 0;
                               const isSelected = selectedServiceItems.has(item.id);
                               return (
-                              <tr key={item.id} className={`hover:bg-muted/20 ${item.status === 'in_progress' ? 'bg-blue-50/40 dark:bg-blue-950/20' : ''} ${item.status === 'needs_action' ? 'bg-amber-50/50 dark:bg-amber-950/20' : ''} ${isSelected ? 'bg-red-50/30 dark:bg-red-950/20' : ''}`} data-testid={`row-item-${item.id}`}>
+                              <tr key={item.id} className={`hover:bg-muted/20 ${item.status === 'in_progress' ? 'bg-blue-50/40 dark:bg-blue-950/20' : ''} ${item.status === 'needs_action' ? 'bg-amber-50/50 dark:bg-amber-950/20' : ''} ${item.status === 'reverting' ? 'bg-violet-50/40 dark:bg-violet-950/20' : ''} ${item.status === 'cancelled' ? 'bg-slate-50/60 dark:bg-slate-900/20' : ''} ${isSelected ? 'bg-red-50/30 dark:bg-red-950/20' : ''}`} data-testid={`row-item-${item.id}`}>
                                 <td className="px-3 py-3.5">
                                   <input
                                     type="checkbox"
@@ -785,8 +819,9 @@ export default function ProjectDetails() {
                                   <div className="flex items-center gap-2">
                                     <StatusBadge status={item.status} />
                                     {item.status === 'in_progress' && <Loader2 className="w-3.5 h-3.5 animate-spin text-blue-500 flex-shrink-0" />}
+                                    {item.status === 'reverting' && <Loader2 className="w-3.5 h-3.5 animate-spin text-violet-500 flex-shrink-0" />}
                                   </div>
-                                  {item.status === 'failed' && item.errorDetails && (
+                                  {(item.status === 'failed' || item.status === 'revert_failed') && item.errorDetails && (
                                     <div className="text-xs text-red-500 mt-1 max-w-[180px] truncate" title={item.errorDetails} data-testid={`text-error-${item.id}`}>{item.errorDetails}</div>
                                   )}
                                   {item.status === 'needs_action' && (
@@ -851,22 +886,32 @@ export default function ProjectDetails() {
                                         </Button>
                                       );
                                     })()}
-                                    {(item.status === 'pending' || item.status === 'failed' || item.status === 'needs_action') && (
+                                    {(item.status === 'pending' || item.status === 'failed' || item.status === 'needs_action' || item.status === 'cancelled') && (
                                       <Button size="sm" variant="ghost" onClick={() => handleMigrateItem(item.id)} title="Start / Retry" data-testid={`button-migrate-${item.id}`}>
                                         <Play className="w-4 h-4 text-emerald-600" />
                                       </Button>
                                     )}
-                                    {(item.status === 'failed' || item.status === 'needs_action') && (
+                                    {item.status === 'in_progress' && (
+                                      <Button size="sm" variant="ghost" onClick={() => handleCancelItem(item.id)} title="Stop migration" data-testid={`button-cancel-${item.id}`}>
+                                        <Square className="w-4 h-4 text-orange-500" />
+                                      </Button>
+                                    )}
+                                    {(item.status === 'completed' || item.status === 'cancelled' || item.status === 'reverted' || item.status === 'revert_failed') && (
+                                      <Button size="sm" variant="ghost" onClick={() => handleRevertItem(item)} title="Revert migration" data-testid={`button-revert-${item.id}`}>
+                                        <Undo2 className="w-4 h-4 text-violet-500" />
+                                      </Button>
+                                    )}
+                                    {(item.status === 'failed' || item.status === 'needs_action' || item.status === 'cancelled' || item.status === 'revert_failed') && (
                                       <Button size="sm" variant="ghost" onClick={() => handleRetry(item.id)} title="Reset to pending" data-testid={`button-retry-${item.id}`}>
                                         <RotateCw className="w-4 h-4 text-blue-600" />
                                       </Button>
                                     )}
-                                    {(item.status === 'in_progress' || item.status === 'completed' || item.status === 'failed' || item.status === 'needs_action') && (
+                                    {['in_progress', 'completed', 'failed', 'needs_action', 'cancelled', 'reverting', 'reverted', 'revert_failed'].includes(item.status) && (
                                       <Button size="sm" variant="ghost" onClick={() => handleViewLogs(item)} title="Logs" data-testid={`button-logs-${item.id}`}>
                                         <FileText className="w-4 h-4 text-slate-500" />
                                       </Button>
                                     )}
-                                    {item.status !== 'in_progress' && (
+                                    {!['in_progress', 'reverting'].includes(item.status) && (
                                       <Button size="sm" variant="ghost" onClick={() => handleDelete(item.id)} title="Delete" data-testid={`button-delete-${item.id}`}>
                                         <Trash2 className="w-4 h-4 text-red-500" />
                                       </Button>

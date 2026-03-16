@@ -129,6 +129,14 @@ export class GraphClient {
     return res.json();
   }
 
+  async delete(path: string): Promise<void> {
+    const res = await this.request(path, { method: 'DELETE' });
+    if (!res.ok && res.status !== 404) {
+      const err = await res.text();
+      throw new Error(`Graph API DELETE ${path} failed (${res.status}): ${err}`);
+    }
+  }
+
   async getBuffer(path: string): Promise<Buffer> {
     const res = await this.request(path);
     if (!res.ok) {

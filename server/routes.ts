@@ -6,6 +6,8 @@ import { api } from "@shared/routes";
 import { z } from "zod";
 import type { Project } from "@shared/schema";
 import { migrateItem, migrateAllPending } from "./services/migration-engine";
+import { requestCancellation } from "./services/cancellation";
+import { revertMigrationItem } from "./services/revert-engine";
 import { GraphClient } from "./services/graph-client";
 import { discoverUsers, discoverSharePointSites, discoverTeams, discoverPowerPlatform, discoverOneDrives, discoverDistributionGroups, discoverSharedMailboxes, discoverM365Groups } from "./services/discovery-service";
 import { discoverCloudOnlyUsers, testAdConnection, migrateUserToAd, generatePowerShellScript, type AdConnectionConfig } from "./services/entra-ad-service";
@@ -169,6 +171,54 @@ export async function registerRoutes(
         started: result.started,
         errors: result.errors,
       });
+    } catch (err: any) {
+      res.status(500).json({ message: err.message || 'Internal server error' });
+    }
+  });
+
+  // === Cancel a running migration ===
+  app.post('/api/projects/:projectId/items/:itemId/cancel', async (req, res) => {
+    try {
+      const projectId = Number(req.params.projectId);
+      const itemId = Number(req.params.itemId);
+
+      const item = await storage.getItem(itemId);
+      if (!item || item.projectId !== projectId) return res.status(404).json({ message: 'Item not found' });
+
+      if (item.status !== 'in_progress') {
+        return res.status(409).json({ message: `Cannot cancel — item is currently "${item.status}", not "in_progress"` });
+      }
+
+      requestCancellation(itemId);
+      res.json({ message: 'Cancellation requested — migration will stop at the next safe checkpoint.' });
+    } catch (err: any) {
+      res.status(500).json({ message: err.message || 'Internal server error' });
+    }
+  });
+
+  // === Revert a completed migration item ===
+  app.post('/api/projects/:projectId/items/:itemId/revert', async (req, res) => {
+    try {
+      const projectId = Number(req.params.projectId);
+      const itemId = Number(req.params.itemId);
+
+      const project = await storage.getProjectInternal(projectId);
+      if (!project) return res.status(404).json({ message: 'Project not found' });
+
+      const item = await storage.getItem(itemId);
+      if (!item || item.projectId !== projectId) return res.status(404).json({ message: 'Item not found' });
+
+      const revertableStatuses = ['completed', 'reverted', 'revert_failed', 'cancelled'];
+      if (!revertableStatuses.includes(item.status)) {
+        return res.status(409).json({ message: `Cannot revert an item with status "${item.status}". Only completed items can be reverted.` });
+      }
+
+      // Run revert in background — caller can poll for status change
+      revertMigrationItem(item, project).catch(err => {
+        console.error(`[revert] item ${itemId} FAILED:`, err.message);
+      });
+
+      res.json({ message: 'Revert started — check item logs for progress.', itemId });
     } catch (err: any) {
       res.status(500).json({ message: err.message || 'Internal server error' });
     }
