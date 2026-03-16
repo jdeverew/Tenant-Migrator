@@ -26,7 +26,7 @@ async function syncMailboxDelta(
   sourceUpn: string,
   targetUpn: string,
   lastSyncedAt: Date | null
-): Promise<{ newMessages: number; logs: string[] }> {
+): Promise<{ newMessages: number; logs: string[]; lastSuccessfulReceivedAt: Date | null }> {
   const logs: string[] = [];
   let newMessages = 0;
 
@@ -34,14 +34,14 @@ async function syncMailboxDelta(
   const sourceUser = await source.get(`/users/${encodeURIComponent(sourceUpn)}?$select=id`).catch(() => null);
   if (!sourceUser) {
     logs.push(syncLog(`Source user ${sourceUpn} not found — skipping mailbox sync`));
-    return { newMessages, logs };
+    return { newMessages, logs, lastSuccessfulReceivedAt: null };
   }
 
   // Resolve target user
   const targetUser = await target.get(`/users/${encodeURIComponent(targetUpn)}?$select=id`).catch(() => null);
   if (!targetUser) {
     logs.push(syncLog(`Target user ${targetUpn} not found — skipping mailbox sync`));
-    return { newMessages, logs };
+    return { newMessages, logs, lastSuccessfulReceivedAt: null };
   }
 
   // Get messages received since lastSyncedAt (or last 24h if no previous sync)
@@ -58,74 +58,82 @@ async function syncMailboxDelta(
     );
   } catch (e: any) {
     logs.push(syncLog(`Failed to fetch messages: ${e.message}`));
-    return { newMessages, logs };
+    return { newMessages, logs, lastSuccessfulReceivedAt: null };
   }
 
-  logs.push(syncLog(`Found ${messages.length} new message(s)`));
+  logs.push(syncLog(`Found ${messages.length} new message(s) since ${since}`));
+
+  // Track the receivedDateTime of the last successfully copied message so we advance
+  // lastSyncedAt accurately (avoiding re-fetching already-copied messages or losing failures)
+  let lastSuccessfulReceivedAt: Date | null = null;
 
   for (const msg of messages) {
     try {
-      // Determine target folder: try to match by well-known name or displayName
+      // Resolve target folder — match by well-known name or display name; fall back to inbox
       let targetFolderId: string | null = null;
       try {
-        const srcFolder = await source.get(`/users/${sourceUser.id}/mailFolders/${msg.parentFolderId}?$select=displayName,wellKnownName`);
-        const wkn = srcFolder?.wellKnownName;
-        if (wkn && wkn !== 'inbox') {
-          const tgt = await target.get(`/users/${targetUser.id}/mailFolders/${wkn}`).catch(() => null);
-          if (tgt) targetFolderId = tgt.id;
-        }
-        if (!targetFolderId) {
-          const existing = await target.get(`/users/${targetUser.id}/mailFolders?$filter=displayName eq '${(srcFolder?.displayName || 'Inbox').replace(/'/g, "''")}' `);
-          if (existing?.value?.length) targetFolderId = existing.value[0].id;
+        const srcFolder = await source.get(`/users/${sourceUser.id}/mailFolders/${msg.parentFolderId}?$select=displayName,wellKnownName`).catch(() => null);
+        if (srcFolder) {
+          const wkn = srcFolder.wellKnownName;
+          if (wkn) {
+            const tgt = await target.get(`/users/${targetUser.id}/mailFolders/${wkn}`).catch(() => null);
+            if (tgt) targetFolderId = tgt.id;
+          }
+          if (!targetFolderId) {
+            const dispName = (srcFolder.displayName || '').replace(/'/g, "''");
+            const existing = await target.get(`/users/${targetUser.id}/mailFolders?$filter=displayName eq '${dispName}'`).catch(() => null);
+            if (existing?.value?.length) targetFolderId = existing.value[0].id;
+          }
         }
       } catch { /* fall back to inbox */ }
 
+      // Build payload with only writable properties.
+      // receivedDateTime and internetMessageId are read-only in Graph API and must NOT be sent
+      // — including them causes HTTP 400 and silently prevents all message copies.
       const payload: any = {
         subject: msg.subject || '(No subject)',
-        from: msg.from,
+        body: msg.body || { contentType: 'text', content: '' },
         toRecipients: msg.toRecipients || [],
         ccRecipients: msg.ccRecipients || [],
         bccRecipients: msg.bccRecipients || [],
-        body: msg.body || { contentType: 'text', content: '' },
         importance: msg.importance || 'normal',
         isRead: msg.isRead ?? false,
-        receivedDateTime: msg.receivedDateTime,
-        internetMessageId: msg.internetMessageId,
+        isDraft: false,  // Create as received message (not draft) so it appears in inbox properly
       };
+      // from is settable with Mail.ReadWrite Application permission
+      if (msg.from) payload.from = msg.from;
 
+      // Always target inbox (or matched folder) — posting to /messages creates a draft in Drafts
       const endpoint = targetFolderId
         ? `/users/${targetUser.id}/mailFolders/${targetFolderId}/messages`
-        : `/users/${targetUser.id}/messages`;
+        : `/users/${targetUser.id}/mailFolders/inbox/messages`;
 
-      await target.post(endpoint, payload);
+      const created = await target.post(endpoint, payload);
       newMessages++;
+      lastSuccessfulReceivedAt = msg.receivedDateTime ? new Date(msg.receivedDateTime) : now;
 
-      // Copy attachments
-      if (msg.hasAttachments) {
+      // Copy attachments (best-effort — size limit 4 MB per attachment)
+      if (msg.hasAttachments && created?.id) {
         try {
-          const created = await target.get(`${endpoint}?$filter=internetMessageId eq '${(msg.internetMessageId || '').replace(/'/g, "''")}'&$select=id&$top=1`);
-          const newMsgId = created?.value?.[0]?.id;
-          if (newMsgId) {
-            const attachments = await source.getAllPages<any>(`/users/${sourceUser.id}/messages/${msg.id}/attachments`);
-            for (const att of attachments) {
-              if (att.size && att.size > 4 * 1024 * 1024) continue; // skip > 4 MB
-              await target.post(`/users/${targetUser.id}/messages/${newMsgId}/attachments`, {
-                '@odata.type': att['@odata.type'] || '#microsoft.graph.fileAttachment',
-                name: att.name,
-                contentType: att.contentType,
-                contentBytes: att.contentBytes,
-              }).catch(() => {});
-            }
+          const attachments = await source.getAllPages<any>(`/users/${sourceUser.id}/messages/${msg.id}/attachments`);
+          for (const att of attachments) {
+            if ((att.size ?? 0) > 4 * 1024 * 1024) continue;
+            await target.post(`/users/${targetUser.id}/messages/${created.id}/attachments`, {
+              '@odata.type': att['@odata.type'] || '#microsoft.graph.fileAttachment',
+              name: att.name,
+              contentType: att.contentType,
+              contentBytes: att.contentBytes,
+            }).catch(() => {});
           }
-        } catch { /* attachment sync is best-effort */ }
+        } catch { /* attachment errors are non-fatal */ }
       }
     } catch (e: any) {
       logs.push(syncLog(`  Failed to copy message "${msg.subject}": ${e.message}`));
     }
   }
 
-  logs.push(syncLog(`Copied ${newMessages}/${messages.length} new message(s) to target`));
-  return { newMessages, logs };
+  logs.push(syncLog(`Copied ${newMessages}/${messages.length} new message(s) to target mailbox`));
+  return { newMessages, logs, lastSuccessfulReceivedAt };
 }
 
 // ── OneDrive / SharePoint delta sync ──────────────────────────────────────
@@ -222,20 +230,17 @@ async function syncItem(project: Project, item: MigrationItem, intervalMinutes: 
 
   try {
     if (item.itemType === 'mailbox') {
-      const { newMessages, logs } = await syncMailboxDelta(source, target, item.sourceIdentity, targetIdentity, item.lastSyncedAt ?? null);
+      const { newMessages, logs, lastSuccessfulReceivedAt } = await syncMailboxDelta(source, target, item.sourceIdentity, targetIdentity, item.lastSyncedAt ?? null);
       await appendLogs(logs);
-      if (newMessages > 0) {
-        await db.update(migrationItems).set({
-          lastSyncedAt: now,
-          nextSyncAt: new Date(now.getTime() + intervalMinutes * 60 * 1000),
-          updatedAt: now,
-        }).where(eq(migrationItems.id, item.id));
-      } else {
-        await db.update(migrationItems).set({
-          lastSyncedAt: now,
-          nextSyncAt: new Date(now.getTime() + intervalMinutes * 60 * 1000),
-        }).where(eq(migrationItems.id, item.id));
-      }
+      // Advance lastSyncedAt only to the last successfully copied message time so that
+      // any messages that failed to copy are retried on the next sync run.
+      // If no new messages were found at all, advance to now (normal interval tick).
+      const advanceTo = newMessages > 0 && lastSuccessfulReceivedAt ? lastSuccessfulReceivedAt : now;
+      await db.update(migrationItems).set({
+        lastSyncedAt: advanceTo,
+        nextSyncAt: new Date(now.getTime() + intervalMinutes * 60 * 1000),
+        ...(newMessages > 0 ? { updatedAt: now } : {}),
+      }).where(eq(migrationItems.id, item.id));
 
     } else if (item.itemType === 'onedrive') {
       // Get source drive ID
@@ -298,12 +303,14 @@ async function syncItem(project: Project, item: MigrationItem, intervalMinutes: 
       }).where(eq(migrationItems.id, item.id));
 
     } else if (item.itemType === 'sharedmailbox') {
-      // Same as mailbox sync
-      const { newMessages, logs } = await syncMailboxDelta(source, target, item.sourceIdentity, targetIdentity, item.lastSyncedAt ?? null);
+      // Same sync logic as mailbox — new messages from source are copied to target
+      const { newMessages, logs, lastSuccessfulReceivedAt } = await syncMailboxDelta(source, target, item.sourceIdentity, targetIdentity, item.lastSyncedAt ?? null);
       await appendLogs(logs);
+      const advanceTo = newMessages > 0 && lastSuccessfulReceivedAt ? lastSuccessfulReceivedAt : now;
       await db.update(migrationItems).set({
-        lastSyncedAt: now,
+        lastSyncedAt: advanceTo,
         nextSyncAt: new Date(now.getTime() + intervalMinutes * 60 * 1000),
+        ...(newMessages > 0 ? { updatedAt: now } : {}),
       }).where(eq(migrationItems.id, item.id));
 
     } else {

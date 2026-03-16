@@ -483,8 +483,9 @@ export default function ProjectDetails() {
                           />
                         </div>
                       </div>
-                      <CardDescription className="text-xs mt-1">
-                        Automatically detect new emails, files, and changes in the source tenant and replicate them to the target — no manual runs needed.
+                      <CardDescription className="text-xs mt-1 space-y-1">
+                        <span className="block">Automatically copies new emails and file changes from source to target after migration completes. Covers: mailboxes, shared mailboxes, OneDrive, SharePoint.</span>
+                        <span className="block text-amber-600 dark:text-amber-400">Requires <code className="bg-amber-50 dark:bg-amber-950/30 px-1 rounded">Mail.ReadWrite</code> and <code className="bg-amber-50 dark:bg-amber-950/30 px-1 rounded">Files.ReadWrite.All</code> Application permissions on both tenant app registrations.</span>
                       </CardDescription>
                     </CardHeader>
                     <CardContent className="space-y-4">
@@ -524,6 +525,13 @@ export default function ProjectDetails() {
                       </div>
 
                       {/* Per-item sync state */}
+                      {(syncStatus as any)?.needsActionCount > 0 && (
+                        <div className="flex items-start gap-2 rounded-lg border border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-950/20 px-3 py-2 text-xs text-amber-700 dark:text-amber-400">
+                          <AlertTriangle className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
+                          <span>{(syncStatus as any).needsActionCount} item(s) have status "Needs Action" and won't sync until fully migrated. Go to the Shared Mailboxes tab, complete the conversion, then re-run migration.</span>
+                        </div>
+                      )}
+
                       {syncStatus && syncStatus.items.length > 0 ? (
                         <div className="space-y-1.5">
                           <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Syncing {syncStatus.items.length} completed item(s)</p>

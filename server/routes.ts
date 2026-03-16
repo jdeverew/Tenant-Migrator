@@ -830,10 +830,12 @@ export async function registerRoutes(
     const items = await storage.getItems(project.id);
     const syncableTypes = ['mailbox', 'onedrive', 'sharepoint', 'sharedmailbox'];
     const syncableItems = items.filter(i => i.status === 'completed' && syncableTypes.includes(i.itemType));
+    const needsActionItems = items.filter(i => i.status === 'needs_action' && syncableTypes.includes(i.itemType));
     return res.json({
       syncEnabled: project.syncEnabled ?? false,
       syncIntervalMinutes: project.syncIntervalMinutes ?? 60,
       completedItems: syncableItems.length,
+      needsActionCount: needsActionItems.length,
       items: syncableItems.map(i => ({
         id: i.id,
         itemType: i.itemType,
