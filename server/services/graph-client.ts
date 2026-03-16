@@ -87,6 +87,19 @@ export class GraphClient {
     return res.json();
   }
 
+  async patch(path: string, body: any): Promise<any> {
+    const res = await this.request(path, {
+      method: 'PATCH',
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      const err = await res.text();
+      throw new Error(`Graph API PATCH ${path} failed (${res.status}): ${err}`);
+    }
+    if (res.status === 204) return null;
+    return res.json().catch(() => null);
+  }
+
   async put(path: string, body: Buffer | string, contentType: string): Promise<any> {
     const token = await this.getAccessToken();
     const url = path.startsWith('http') ? path : `https://graph.microsoft.com/v1.0${path}`;

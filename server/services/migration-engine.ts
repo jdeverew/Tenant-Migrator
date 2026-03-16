@@ -140,7 +140,7 @@ async function migrateMailbox(
 
       try {
         const messages = await source.getAllPages<any>(
-          `/users/${sourceUser}/mailFolders/${folder.id}/messages?$top=50&$select=id,subject,body,from,toRecipients,ccRecipients,bccRecipients,receivedDateTime,importance,isRead,hasAttachments`
+          `/users/${sourceUser}/mailFolders/${folder.id}/messages?$top=50&$select=id,subject,body,from,toRecipients,ccRecipients,bccRecipients,receivedDateTime,importance,isRead,hasAttachments,flag`
         );
         totalMessages += messages.length;
         logs.push(logEntry(`Found ${messages.length} messages in "${folderName}"`));
@@ -158,6 +158,7 @@ async function migrateMailbox(
               receivedDateTime: msg.receivedDateTime,
               importance: msg.importance || "normal",
               isRead: msg.isRead !== undefined ? msg.isRead : true,
+              flag: msg.flag || { flagStatus: 'notFlagged' },
             };
 
             const createdMsg = await target.post(`/users/${targetUser}/mailFolders/${targetFolderId}/messages`, newMessage);
@@ -187,8 +188,186 @@ async function migrateMailbox(
     const attachmentSummary = attachmentsMigrated + attachmentsFailed > 0
       ? `, ${attachmentsMigrated} attachments migrated (${attachmentsFailed} failed)`
       : '';
-    logs.push(logEntry(`Mailbox migration complete: ${migratedMessages} messages migrated, ${failedMessages} failed out of ${totalMessages} total${attachmentSummary}`));
+    logs.push(logEntry(`Messages complete: ${migratedMessages} migrated, ${failedMessages} failed out of ${totalMessages}${attachmentSummary}`));
+    await updateItemProgress(itemId, 'in_progress', logs);
 
+    // ── CALENDAR EVENTS ──────────────────────────────────────────────────────
+    logs.push(logEntry('── Migrating calendar events...'));
+    await updateItemProgress(itemId, 'in_progress', logs);
+    try {
+      const calendars = await source.getAllPages<any>(`/users/${sourceUser}/calendars`);
+      let calMigrated = 0, calFailed = 0, calTotal = 0;
+      for (const cal of calendars) {
+        let targetCalId: string;
+        try {
+          const tCals = await target.get(`/users/${targetUser}/calendars?$filter=name eq '${cal.name.replace(/'/g, "''")}'`);
+          targetCalId = tCals.value?.length > 0
+            ? tCals.value[0].id
+            : (await target.post(`/users/${targetUser}/calendars`, { name: cal.name })).id;
+        } catch {
+          targetCalId = (await target.get(`/users/${targetUser}/calendar`)).id;
+        }
+        const events = await source.getAllPages<any>(`/users/${sourceUser}/calendars/${cal.id}/events?$top=50`);
+        calTotal += events.length;
+        for (const ev of events) {
+          try {
+            const payload: any = {
+              subject: ev.subject, body: ev.body,
+              start: ev.start, end: ev.end,
+              location: ev.location, isAllDay: ev.isAllDay || false,
+              showAs: ev.showAs, sensitivity: ev.sensitivity,
+              importance: ev.importance, isReminderOn: ev.isReminderOn,
+              reminderMinutesBeforeStart: ev.reminderMinutesBeforeStart,
+            };
+            if (ev.attendees?.length) payload.attendees = ev.attendees;
+            if (ev.recurrence) payload.recurrence = ev.recurrence;
+            await target.post(`/users/${targetUser}/calendars/${targetCalId}/events`, payload);
+            calMigrated++;
+          } catch { calFailed++; }
+        }
+      }
+      logs.push(logEntry(`Calendar: ${calMigrated} events migrated, ${calFailed} failed out of ${calTotal}`));
+    } catch (e: any) {
+      logs.push(logEntry(`Calendar migration skipped: ${e.message}`));
+    }
+
+    // ── CONTACTS ─────────────────────────────────────────────────────────────
+    logs.push(logEntry('── Migrating contacts...'));
+    await updateItemProgress(itemId, 'in_progress', logs);
+    try {
+      const contacts = await source.getAllPages<any>(`/users/${sourceUser}/contacts?$top=100`);
+      let cntMigrated = 0, cntFailed = 0;
+      for (const c of contacts) {
+        try {
+          const payload: any = { displayName: c.displayName };
+          if (c.givenName) payload.givenName = c.givenName;
+          if (c.surname) payload.surname = c.surname;
+          if (c.emailAddresses?.length) payload.emailAddresses = c.emailAddresses;
+          if (c.businessPhones?.length) payload.businessPhones = c.businessPhones;
+          if (c.mobilePhone) payload.mobilePhone = c.mobilePhone;
+          if (c.jobTitle) payload.jobTitle = c.jobTitle;
+          if (c.companyName) payload.companyName = c.companyName;
+          if (c.department) payload.department = c.department;
+          if (c.officeLocation) payload.officeLocation = c.officeLocation;
+          if (c.businessAddress) payload.businessAddress = c.businessAddress;
+          if (c.birthday) payload.birthday = c.birthday;
+          if (c.personalNotes) payload.personalNotes = c.personalNotes;
+          await target.post(`/users/${targetUser}/contacts`, payload);
+          cntMigrated++;
+        } catch { cntFailed++; }
+      }
+      logs.push(logEntry(`Contacts: ${cntMigrated} migrated, ${cntFailed} failed out of ${contacts.length}`));
+    } catch (e: any) {
+      logs.push(logEntry(`Contacts migration skipped: ${e.message}`));
+    }
+
+    // ── TASKS (Microsoft To Do) ───────────────────────────────────────────────
+    logs.push(logEntry('── Migrating tasks (Microsoft To Do)...'));
+    await updateItemProgress(itemId, 'in_progress', logs);
+    try {
+      const taskLists = await source.getAllPages<any>(`/users/${sourceUser}/todo/lists`);
+      let taskMigrated = 0, taskFailed = 0, taskTotal = 0;
+      for (const list of taskLists) {
+        let targetListId: string;
+        try {
+          const escaped = list.displayName.replace(/'/g, "''");
+          const tLists = await target.get(`/users/${targetUser}/todo/lists?$filter=displayName eq '${escaped}'`);
+          targetListId = tLists.value?.length > 0
+            ? tLists.value[0].id
+            : (await target.post(`/users/${targetUser}/todo/lists`, { displayName: list.displayName })).id;
+        } catch { continue; }
+        const tasks = await source.getAllPages<any>(`/users/${sourceUser}/todo/lists/${list.id}/tasks`);
+        taskTotal += tasks.length;
+        for (const task of tasks) {
+          try {
+            const payload: any = {
+              title: task.title,
+              importance: task.importance || 'normal',
+              status: task.status || 'notStarted',
+            };
+            if (task.body) payload.body = task.body;
+            if (task.dueDateTime) payload.dueDateTime = task.dueDateTime;
+            if (task.reminderDateTime) payload.reminderDateTime = task.reminderDateTime;
+            if (task.completedDateTime) payload.completedDateTime = task.completedDateTime;
+            await target.post(`/users/${targetUser}/todo/lists/${targetListId}/tasks`, payload);
+            taskMigrated++;
+          } catch { taskFailed++; }
+        }
+      }
+      logs.push(logEntry(`Tasks: ${taskMigrated} migrated, ${taskFailed} failed out of ${taskTotal}`));
+    } catch (e: any) {
+      logs.push(logEntry(`Tasks migration skipped: ${e.message}`));
+    }
+
+    // ── MAILBOX RULES ─────────────────────────────────────────────────────────
+    logs.push(logEntry('── Migrating mailbox rules...'));
+    await updateItemProgress(itemId, 'in_progress', logs);
+    try {
+      const rulesRes = await source.get(`/users/${sourceUser}/mailFolders/inbox/messageRules`);
+      let rulesMigrated = 0, rulesFailed = 0;
+      for (const rule of rulesRes.value || []) {
+        try {
+          await target.post(`/users/${targetUser}/mailFolders/inbox/messageRules`, {
+            displayName: rule.displayName,
+            sequence: rule.sequence,
+            isEnabled: rule.isEnabled,
+            conditions: rule.conditions,
+            actions: rule.actions,
+            exceptions: rule.exceptions,
+          });
+          rulesMigrated++;
+        } catch { rulesFailed++; }
+      }
+      logs.push(logEntry(`Mailbox rules: ${rulesMigrated} migrated, ${rulesFailed} failed`));
+    } catch (e: any) {
+      logs.push(logEntry(`Mailbox rules migration skipped: ${e.message}`));
+    }
+
+    // ── OUT-OF-OFFICE / MAILBOX SETTINGS ────────────────────────────────────
+    logs.push(logEntry('── Migrating mailbox settings (OOO, timezone, working hours)...'));
+    await updateItemProgress(itemId, 'in_progress', logs);
+    try {
+      const mbSettings = await source.get(`/users/${sourceUser}/mailboxSettings`);
+      const settingsPayload: any = {};
+      if (mbSettings.automaticRepliesSetting) settingsPayload.automaticRepliesSetting = mbSettings.automaticRepliesSetting;
+      if (mbSettings.timeZone) settingsPayload.timeZone = mbSettings.timeZone;
+      if (mbSettings.workingHours) settingsPayload.workingHours = mbSettings.workingHours;
+      if (mbSettings.language) settingsPayload.language = mbSettings.language;
+      if (mbSettings.dateFormat) settingsPayload.dateFormat = mbSettings.dateFormat;
+      if (mbSettings.timeFormat) settingsPayload.timeFormat = mbSettings.timeFormat;
+      if (Object.keys(settingsPayload).length > 0) {
+        await target.patch(`/users/${targetUser}/mailboxSettings`, settingsPayload);
+        logs.push(logEntry('Mailbox settings migrated (auto-reply, timezone, working hours, language)'));
+      }
+    } catch (e: any) {
+      logs.push(logEntry(`Mailbox settings migration skipped: ${e.message}`));
+    }
+
+    // ── CATEGORIES ───────────────────────────────────────────────────────────
+    logs.push(logEntry('── Migrating Outlook categories...'));
+    await updateItemProgress(itemId, 'in_progress', logs);
+    try {
+      const cats = await source.get(`/users/${sourceUser}/outlook/masterCategories`);
+      let catMigrated = 0;
+      for (const cat of cats.value || []) {
+        try {
+          await target.post(`/users/${targetUser}/outlook/masterCategories`, {
+            displayName: cat.displayName,
+            color: cat.color,
+          });
+          catMigrated++;
+        } catch { /* may already exist in target */ }
+      }
+      if (catMigrated > 0) logs.push(logEntry(`Categories: ${catMigrated} migrated`));
+      else logs.push(logEntry('Categories: none to migrate or already exist'));
+    } catch (e: any) {
+      logs.push(logEntry(`Categories migration skipped: ${e.message}`));
+    }
+
+    // ── API LIMITATIONS NOTE ────────────────────────────────────────────────
+    logs.push(logEntry('Note: Email signatures and full mailbox delegate permissions cannot be migrated — Microsoft Graph API does not expose these endpoints.'));
+
+    logs.push(logEntry('✓ Mailbox migration complete'));
     if (failedMessages > 0 && migratedMessages === 0) {
       await updateItemProgress(itemId, 'failed', logs, `All ${failedMessages} messages failed to migrate`);
     } else if (failedMessages > 0) {
@@ -305,6 +484,53 @@ async function migrateDriveItemsRecursive(
             item.file.mimeType || 'application/octet-stream'
           );
         }
+
+        // ── Preserve original file timestamps ────────────────────────────
+        try {
+          if (item.fileSystemInfo?.lastModifiedDateTime || item.fileSystemInfo?.createdDateTime) {
+            const fsPayload: any = { fileSystemInfo: {} };
+            if (item.fileSystemInfo.createdDateTime)      fsPayload.fileSystemInfo.createdDateTime      = item.fileSystemInfo.createdDateTime;
+            if (item.fileSystemInfo.lastModifiedDateTime) fsPayload.fileSystemInfo.lastModifiedDateTime = item.fileSystemInfo.lastModifiedDateTime;
+            await target.patch(`/drives/${targetDriveId}/root:${targetParentPath}/${item.name}:`, fsPayload);
+          }
+        } catch { /* non-critical — timestamps are best-effort */ }
+
+        // ── Copy item-level permissions ────────────────────────────────────
+        try {
+          const permRes = await source.get(`/drives/${sourceDriveId}/items/${item.id}/permissions`);
+          for (const perm of permRes.value || []) {
+            if (perm.inheritedFrom) continue; // skip inherited — parent folder handles them
+            try {
+              if (perm.link) {
+                // Recreate sharing link with same role/scope
+                await target.post(`/drives/${targetDriveId}/root:${targetParentPath}/${item.name}:/createLink`, {
+                  type: perm.link.type,
+                  scope: perm.link.scope,
+                });
+              } else if (perm.grantedToV2?.user?.email) {
+                // Direct user permission
+                await target.post(`/drives/${targetDriveId}/root:${targetParentPath}/${item.name}:/invite`, {
+                  requireSignIn: true,
+                  sendInvitation: false,
+                  roles: perm.roles || ['read'],
+                  recipients: [{ email: perm.grantedToV2.user.email }],
+                });
+              } else if (perm.grantedToIdentitiesV2?.length) {
+                // Group/multiple identities
+                for (const identity of perm.grantedToIdentitiesV2) {
+                  if (identity.user?.email) {
+                    await target.post(`/drives/${targetDriveId}/root:${targetParentPath}/${item.name}:/invite`, {
+                      requireSignIn: true,
+                      sendInvitation: false,
+                      roles: perm.roles || ['read'],
+                      recipients: [{ email: identity.user.email }],
+                    });
+                  }
+                }
+              }
+            } catch { /* individual permission copy is best-effort */ }
+          }
+        } catch { /* permissions are best-effort */ }
 
         counters.migrated++;
         counters.bytesMigrated += fileSize;
@@ -566,12 +792,140 @@ async function migrateSharePoint(
       }
     }
 
-    logs.push(logEntry(`SharePoint migration complete: ${counters.migrated} migrated, ${counters.failed} failed out of ${counters.total} total`));
+    logs.push(logEntry(`Document libraries: ${counters.migrated} files migrated, ${counters.failed} failed out of ${counters.total} total`));
+    await updateItemProgress(itemId, 'in_progress', logs);
 
+    // ── NON-LIBRARY LISTS ────────────────────────────────────────────────────
+    logs.push(logEntry('── Migrating SharePoint lists (non-library)...'));
+    await updateItemProgress(itemId, 'in_progress', logs);
+    try {
+      const allLists = await source.getAllPages<any>(`/sites/${sourceSite.id}/lists?$expand=columns`);
+      const customLists = allLists.filter((l: any) =>
+        l.list?.template !== 'documentLibrary' &&
+        l.list?.template !== 'webPageLibrary' &&
+        !l.name?.startsWith('_') &&
+        !['appdata', 'appfiles', 'Composed Looks', 'Master Page Gallery', 'Solution Gallery', 'Theme Gallery', 'User Information List', 'Web Part Gallery'].includes(l.name)
+      );
+      let listsMigrated = 0, listsFailed = 0;
+      for (const list of customLists) {
+        try {
+          // Create target list
+          let targetList: any;
+          try {
+            targetList = await target.post(`/sites/${targetSite.id}/lists`, {
+              displayName: list.displayName,
+              list: { template: list.list?.template || 'genericList' },
+            });
+          } catch {
+            // May already exist — try to find it
+            const existing = await target.get(`/sites/${targetSite.id}/lists?$filter=displayName eq '${list.displayName.replace(/'/g, "''")}'`);
+            if (existing.value?.length > 0) targetList = existing.value[0];
+            else throw new Error(`Could not create or find list "${list.displayName}"`);
+          }
+
+          // Create custom columns (skip built-in ones)
+          const builtIn = new Set(['Title', 'ID', 'Created', 'Modified', 'Author', 'Editor', 'ContentType', 'Attachments', '_UIVersionString', 'Edit', 'DocIcon', 'LinkTitleNoMenu', 'LinkTitle', 'ItemChildCount', 'FolderChildCount', 'AppAuthor', 'AppEditor']);
+          for (const col of (list.columns || [])) {
+            if (builtIn.has(col.name) || col.readOnly || col.hidden) continue;
+            try {
+              await target.post(`/sites/${targetSite.id}/lists/${targetList.id}/columns`, {
+                name: col.name,
+                displayName: col.displayName,
+                description: col.description || '',
+                [col.text ? 'text' : col.number ? 'number' : col.boolean ? 'boolean' : col.dateTime ? 'dateTime' : col.choice ? 'choice' : 'text']: col.text || col.number || col.boolean || col.dateTime || col.choice || {},
+              });
+            } catch { /* column may already exist or be invalid */ }
+          }
+
+          // Copy list items
+          const items = await source.getAllPages<any>(`/sites/${sourceSite.id}/lists/${list.id}/items?$expand=fields`);
+          let itemsMigrated = 0;
+          for (const item of items) {
+            try {
+              const fields: any = {};
+              for (const [key, val] of Object.entries(item.fields || {})) {
+                if (['@odata.etag', 'id', 'ID', 'Created', 'Modified', 'AuthorLookupId', 'EditorLookupId', 'ContentType', 'Attachments', '_UIVersionString', 'Edit', 'DocIcon', 'LinkTitleNoMenu', 'LinkTitle', 'ItemChildCount', 'FolderChildCount', 'AppAuthor', 'AppEditor'].includes(key)) continue;
+                if (!key.startsWith('@') && !key.startsWith('_') && val !== null && val !== undefined) {
+                  fields[key] = val;
+                }
+              }
+              await target.post(`/sites/${targetSite.id}/lists/${targetList.id}/items`, { fields });
+              itemsMigrated++;
+            } catch { /* item copy is best-effort */ }
+          }
+          logs.push(logEntry(`✓ List "${list.displayName}": ${itemsMigrated}/${items.length} items migrated`));
+          listsMigrated++;
+        } catch (e: any) {
+          listsFailed++;
+          logs.push(logEntry(`List "${list.displayName}" failed: ${e.message}`));
+        }
+      }
+      logs.push(logEntry(`Lists: ${listsMigrated} lists migrated, ${listsFailed} failed`));
+    } catch (e: any) {
+      logs.push(logEntry(`Lists migration skipped: ${e.message}`));
+    }
+
+    // ── SITE PAGES ───────────────────────────────────────────────────────────
+    logs.push(logEntry('── Migrating site pages...'));
+    await updateItemProgress(itemId, 'in_progress', logs);
+    try {
+      // Pages API is in beta
+      const pagesRes = await source.get(`https://graph.microsoft.com/beta/sites/${sourceSite.id}/pages`);
+      const pages = pagesRes.value || [];
+      let pagesMigrated = 0, pagesFailed = 0;
+      for (const page of pages) {
+        try {
+          // Fetch full page content
+          const fullPage = await source.get(`https://graph.microsoft.com/beta/sites/${sourceSite.id}/pages/${page.id}?$expand=canvasLayout`);
+          const pagePayload: any = {
+            name: fullPage.name,
+            title: fullPage.title,
+            pageLayout: fullPage.pageLayout || 'article',
+            showComments: fullPage.showComments ?? true,
+            showRecommendedPages: fullPage.showRecommendedPages ?? false,
+          };
+          if (fullPage.canvasLayout) pagePayload.canvasLayout = fullPage.canvasLayout;
+          if (fullPage.titleArea) pagePayload.titleArea = fullPage.titleArea;
+          await target.post(`https://graph.microsoft.com/beta/sites/${targetSite.id}/pages`, pagePayload);
+          pagesMigrated++;
+        } catch { pagesFailed++; }
+      }
+      logs.push(logEntry(`Pages: ${pagesMigrated} migrated, ${pagesFailed} failed out of ${pages.length}`));
+    } catch (e: any) {
+      logs.push(logEntry(`Pages migration skipped: ${e.message}`));
+    }
+
+    // ── SITE PERMISSIONS ─────────────────────────────────────────────────────
+    logs.push(logEntry('── Migrating site permissions...'));
+    await updateItemProgress(itemId, 'in_progress', logs);
+    try {
+      const permsRes = await source.getAllPages<any>(`/sites/${sourceSite.id}/permissions`);
+      let permsMigrated = 0, permsFailed = 0;
+      for (const perm of permsRes) {
+        try {
+          if (perm.grantedToIdentities?.length) {
+            await target.post(`/sites/${targetSite.id}/permissions`, {
+              roles: perm.roles,
+              grantedToIdentities: perm.grantedToIdentities,
+            });
+            permsMigrated++;
+          }
+        } catch { permsFailed++; }
+      }
+      logs.push(logEntry(`Site permissions: ${permsMigrated} migrated, ${permsFailed} failed`));
+    } catch (e: any) {
+      logs.push(logEntry(`Site permissions migration skipped: ${e.message}`));
+    }
+
+    // ── API LIMITATIONS NOTE ────────────────────────────────────────────────
+    logs.push(logEntry('Note: SharePoint site branding, navigation, and classic/Power Automate workflows cannot be migrated via Microsoft Graph API.'));
+    logs.push(logEntry('Note: File version history cannot be migrated — Microsoft Graph API does not support creating historical versions.'));
+
+    logs.push(logEntry('✓ SharePoint migration complete'));
     if (counters.failed > 0 && counters.migrated === 0) {
-      await updateItemProgress(itemId, 'failed', logs, `All ${counters.failed} items failed`);
+      await updateItemProgress(itemId, 'failed', logs, `All ${counters.failed} file items failed`);
     } else if (counters.failed > 0) {
-      await updateItemProgress(itemId, 'completed', logs, `${counters.failed} items failed`);
+      await updateItemProgress(itemId, 'completed', logs, `${counters.failed} file items failed`);
     } else {
       await updateItemProgress(itemId, 'completed', logs);
     }
