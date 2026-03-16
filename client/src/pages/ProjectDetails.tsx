@@ -1177,10 +1177,11 @@ function DiscoveryTab({ projectId, onImport }: DiscoveryTabProps) {
 
     setLoading(true);
     try {
-      // Build source identities for mapping
+      // Build source identities for mapping — must match what we store as sourceIdentity later
       const sourceIdentities = selectedItems.map(r => {
-        if (activeType === 'users' || activeType === 'onedrive') return r.userPrincipalName;
+        if (activeType === 'users' || activeType === 'onedrive' || activeType === 'sharedmailboxes') return r.userPrincipalName;
         if (activeType === 'sharepoint') return r.webUrl;
+        if (activeType === 'distributiongroups' || activeType === 'm365groups') return r.mail || r.displayName;
         return r.id;
       });
 

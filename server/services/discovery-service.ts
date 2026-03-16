@@ -215,44 +215,51 @@ export async function discoverDistributionGroups(client: GraphClient): Promise<D
 }
 
 export async function discoverSharedMailboxes(client: GraphClient): Promise<DiscoveredSharedMailbox[]> {
-  // Strategy: fetch all users, filter to candidates (unlicensed + have mail),
-  // then confirm each via mailboxSettings.userPurpose === 'shared'.
-  // We cannot use $count-based OData filters without ConsistencyLevel header support,
-  // so we do the license check client-side.
+  // Strategy: fetch all users with license + accountEnabled info, filter to candidates,
+  // then confirm each via mailboxSettings.userPurpose.
+  // Candidates = unlicensed OR sign-in disabled (accountEnabled=false) accounts with a mail address.
+  // Cannot use $count-based OData filters without ConsistencyLevel header, so we filter client-side.
   const allUsers = await client.getAllPages<any>(
-    `/users?$select=id,displayName,userPrincipalName,mail,assignedLicenses&$top=999`
+    `/users?$select=id,displayName,userPrincipalName,mail,assignedLicenses,accountEnabled&$top=999`
   );
 
-  // Phase 1: cheap client-side filter — unlicensed users with a mail address
-  // Shared mailboxes are almost always unlicensed (admins occasionally assign licenses, so we widen a bit)
+  // Phase 1: broad client-side filter.
+  // Include accounts that are either:
+  //   a) Unlicensed AND have a mail address (most shared mailboxes)
+  //   b) Sign-in disabled (accountEnabled=false) AND have a mail address
+  //      — Exchange sets accountEnabled=false for shared mailboxes
   const candidates = allUsers.filter((u: any) => {
     if (!u.mail) return false;
-    if (u.userPrincipalName?.includes('#EXT#')) return false; // skip guest accounts
-    const licenseCount = (u.assignedLicenses || []).length;
-    return licenseCount === 0; // unlicensed accounts only
+    if (u.userPrincipalName?.includes('#EXT#')) return false; // skip guests
+    const isUnlicensed = (u.assignedLicenses || []).length === 0;
+    const isDisabled = u.accountEnabled === false;
+    return isUnlicensed || isDisabled;
   });
 
-  // Phase 2: confirm via mailboxSettings.userPurpose for precision
+  // Phase 2: confirm via mailboxSettings.userPurpose
+  // userPurpose values: 'shared', 'user', 'linked', 'room', 'equipment', 'others', or absent
+  // Accept 'shared' (explicit), blank (field not returned by tenant), or 'user' on a disabled account
+  // (Exchange sometimes reports 'user' for shared mailboxes — disabled sign-in is the real indicator)
+  // Skip 'room', 'equipment', 'others'
   const results: DiscoveredSharedMailbox[] = [];
   for (const u of candidates) {
     try {
       const settings = await client.get(`/users/${u.id}/mailboxSettings`);
-      // userPurpose: 'shared' = shared mailbox, 'room' = room mailbox, 'equipment' = equipment
-      // Accept 'shared' explicitly, or any mailbox-enabled unlicensed account if userPurpose is missing
       const purpose: string = settings?.userPurpose || '';
-      // Accept shared mailboxes; also include accounts where userPurpose isn't returned (empty string)
-      // Skip room, equipment, and confirmed regular user mailboxes
-      if (purpose === 'shared' || purpose === '') {
+      const isShared = purpose === 'shared';
+      const isPurposeBlank = purpose === '';
+      const isDisabledWithUserPurpose = u.accountEnabled === false && purpose === 'user';
+      if (isShared || isPurposeBlank || isDisabledWithUserPurpose) {
         results.push({
           id: u.id,
           displayName: u.displayName || u.userPrincipalName,
           userPrincipalName: u.userPrincipalName,
           mail: u.mail,
-          mailboxType: purpose || 'shared',
+          mailboxType: 'shared',
           memberCount: 0,
         });
       }
-    } catch { /* user has no mailbox — skip */ }
+    } catch { /* no mailbox or insufficient permissions — skip */ }
   }
   return results;
 }
