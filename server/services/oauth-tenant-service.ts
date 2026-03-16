@@ -267,12 +267,59 @@ export async function handleOAuthCallback(code: string, state: string): Promise<
 
 // ── Build per-service admin consent URL ──────────────────────────────────────
 
-export function buildConsentUrl(tenantId: string, clientId: string, _service: ServiceKey): string {
+// Encode projectId + tenantType into the consent URL state so the callback can
+// persist which services were consented directly to the database.
+interface ConsentState {
+  projectId: number;
+  tenantType: 'source' | 'target';
+}
+
+function encodeConsentState(data: ConsentState): string {
+  const encoded = Buffer.from(JSON.stringify(data)).toString('base64url');
+  const sig = createHmac('sha256', STATE_SECRET).update(encoded).digest('base64url');
+  return `${encoded}.${sig}`;
+}
+
+export function decodeConsentState(state: string): ConsentState | null {
+  try {
+    const dot = state.lastIndexOf('.');
+    if (dot < 0) return null;
+    const encoded = state.slice(0, dot);
+    const sig = state.slice(dot + 1);
+    const expected = createHmac('sha256', STATE_SECRET).update(encoded).digest('base64url');
+    if (sig !== expected) return null;
+    return JSON.parse(Buffer.from(encoded, 'base64url').toString()) as ConsentState;
+  } catch {
+    return null;
+  }
+}
+
+export function buildConsentUrl(
+  tenantId: string,
+  clientId: string,
+  _service: ServiceKey,
+  projectId?: number,
+  tenantType?: 'source' | 'target',
+): string {
   // AADSTS5000224 = "Non-admin user tried the admin consent URL"
   // Root cause: Azure silently picks up a cached non-admin browser session and immediately
   // shows the error before any login screen appears.
   // Fix: prompt=select_account forces the account picker so the user explicitly chooses
   // their Global Admin account instead of Azure auto-selecting a cached non-admin session.
-  const params = new URLSearchParams({ client_id: clientId, prompt: 'select_account' });
-  return `https://login.microsoftonline.com/${tenantId}/adminconsent?${params}`;
+  const params: Record<string, string> = { client_id: clientId, prompt: 'select_account' };
+  if (projectId !== undefined && tenantType) {
+    params.state = encodeConsentState({ projectId, tenantType });
+  }
+  return `https://login.microsoftonline.com/${tenantId}/adminconsent?${new URLSearchParams(params)}`;
+}
+
+// ── Build re-grant consent URL (no new app created) ──────────────────────────
+// Used when the project already has an app registration and just needs (re-)consent.
+export function buildRegrantConsentUrl(
+  tenantId: string,
+  clientId: string,
+  projectId: number,
+  tenantType: 'source' | 'target',
+): string {
+  return buildConsentUrl(tenantId, clientId, 'users', projectId, tenantType);
 }

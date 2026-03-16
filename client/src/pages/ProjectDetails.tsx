@@ -761,6 +761,7 @@ function TenantCredentialForm({
   tenantId,
   clientId,
   clientSecret,
+  consentedServices,
 }: {
   label: string;
   tenantType: 'source' | 'target';
@@ -768,8 +769,10 @@ function TenantCredentialForm({
   tenantId: string;
   clientId: string | null;
   clientSecret: string | null;
+  consentedServices?: string | null;
 }) {
   const { toast } = useToast();
+  const queryClient = useQueryClient();
   const { mutateAsync: updateProject, isPending: isSaving } = useUpdateProject();
   const [showSecret, setShowSecret] = useState(false);
   const [localTenantId, setLocalTenantId] = useState(tenantId || '');
@@ -778,8 +781,54 @@ function TenantCredentialForm({
   const hasExistingSecret = !!clientSecret;
   const [testResult, setTestResult] = useState<{ success: boolean; message: string } | null>(null);
   const [isTesting, setIsTesting] = useState(false);
-  const [grantedServices, setGrantedServices] = useState<Set<string>>(new Set());
+  const [isRegranting, setIsRegranting] = useState(false);
+
+  // Initialise from DB-persisted consent, keep local optimistic updates in sync
+  const persistedServices: string[] = (() => {
+    try { return JSON.parse(consentedServices || '[]'); } catch { return []; }
+  })();
+  const [grantedServices, setGrantedServices] = useState<Set<string>>(new Set(persistedServices));
+
+  // Keep local state in sync when the project data refreshes from server (e.g. after postMessage invalidation)
+  const [prevConsentedServices, setPrevConsentedServices] = useState(consentedServices);
+  if (consentedServices !== prevConsentedServices) {
+    setPrevConsentedServices(consentedServices);
+    setGrantedServices(prev => {
+      const fresh = new Set<string>(persistedServices);
+      prev.forEach(s => fresh.add(s)); // keep any locally granted services too
+      return fresh;
+    });
+  }
+
   const isConnected = !!(clientId && clientSecret);
+  const allServiceKeys = SERVICES.map(s => s.key);
+  const allGranted = allServiceKeys.every(k => grantedServices.has(k));
+
+  // Listen for postMessage from the consent popup — update local state & refresh project
+  const onConsentMessage = (projectId: number) => (e: MessageEvent) => {
+    if (e.origin !== window.location.origin) return;
+    if (e.data?.type === 'consent_success') {
+      const all = new Set(allServiceKeys);
+      setGrantedServices(all);
+      // Refresh project from server so persisted consent is loaded (key matches useProject hook)
+      queryClient.invalidateQueries({ queryKey: ['/api/projects/:id', projectId] });
+    } else if (e.data?.type === 'consent_error') {
+      toast({ title: "Consent error", description: e.data.error, variant: "destructive" });
+    }
+  };
+
+  const openConsentPopup = (url: string, serviceKey: string) => {
+    const handler = onConsentMessage(projectId);
+    window.addEventListener('message', handler, { once: true });
+    const popup = window.open(url, `consent_${serviceKey}`, 'width=700,height=700,scrollbars=yes');
+    if (!popup) {
+      window.removeEventListener('message', handler);
+      window.open(url, '_blank');
+      toast({ title: "Popup blocked", description: "Consent page opened in a new tab. Grant permissions there, then return here." });
+    } else {
+      toast({ title: "Select your Global Admin account", description: "Choose your Global Admin account in the popup, then click Accept." });
+    }
+  };
 
   const handleConnect = () => {
     if (!localTenantId?.trim()) {
@@ -795,27 +844,38 @@ function TenantCredentialForm({
     window.location.href = `/api/oauth/connect?${params}`;
   };
 
+  // Re-grant using the EXISTING app registration — no new OAuth flow
+  const handleRegrantAll = async () => {
+    setIsRegranting(true);
+    try {
+      const res = await fetch(`/api/oauth/regrant-url?projectId=${projectId}&tenantType=${tenantType}`);
+      const data = await res.json() as any;
+      if (data.url) {
+        openConsentPopup(data.url, 'regrant');
+      } else {
+        toast({ title: "Error", description: data.message || "Could not build re-grant URL.", variant: "destructive" });
+      }
+    } catch {
+      toast({ title: "Error", description: "Could not build re-grant URL.", variant: "destructive" });
+    } finally {
+      setIsRegranting(false);
+    }
+  };
+
   const handleGrantService = async (serviceKey: string) => {
     if (!localTenantId || !localClientId) return;
     try {
-      const res = await fetch(`/api/oauth/consent-url?tenantId=${encodeURIComponent(localTenantId)}&clientId=${encodeURIComponent(localClientId)}&service=${serviceKey}`);
+      const params = new URLSearchParams({
+        tenantId: localTenantId,
+        clientId: localClientId,
+        service: serviceKey,
+        projectId: String(projectId),
+        tenantType,
+      });
+      const res = await fetch(`/api/oauth/consent-url?${params}`);
       const data = await res.json() as any;
       if (data.url) {
-        const popup = window.open(data.url, `consent_${serviceKey}`, 'width=700,height=700,scrollbars=yes');
-        if (!popup) {
-          // Popup blocked — open in new tab and ask user to confirm manually
-          window.open(data.url, '_blank');
-          toast({ title: "Popup blocked", description: "Consent page opened in a new tab. Grant permissions there, then click the Grant button again." });
-        } else {
-          toast({ title: "Select your Global Admin account", description: "An account picker will appear — choose your Global Admin account, then click Accept." });
-          // Detect when popup closes — mark as granted regardless (permissions verified at migration time)
-          const timer = setInterval(() => {
-            if (popup.closed) {
-              clearInterval(timer);
-              setGrantedServices(prev => new Set([...prev, serviceKey]));
-            }
-          }, 500);
-        }
+        openConsentPopup(data.url, serviceKey);
       }
     } catch {
       toast({ title: "Error", description: "Could not build consent URL.", variant: "destructive" });
@@ -865,20 +925,42 @@ function TenantCredentialForm({
                 <CheckCircle2 className="w-3 h-3" /> Connected
               </span>
             )}
+            {isConnected && allGranted && (
+              <span className="inline-flex items-center gap-1 text-xs font-medium px-2 py-0.5 rounded-full bg-blue-100 dark:bg-blue-950/50 text-blue-700 dark:text-blue-400 border border-blue-200 dark:border-blue-800">
+                <CheckCircle2 className="w-3 h-3" /> All permissions granted
+              </span>
+            )}
           </div>
-          <Button
-            onClick={handleConnect}
-            size="sm"
-            className="gap-2"
-            data-testid={`button-connect-tenant-${tenantType}`}
-          >
-            <Wand2 className="w-4 h-4" />
-            {isConnected ? 'Reconnect with Microsoft' : 'Connect with Microsoft'}
-          </Button>
+          <div className="flex items-center gap-2">
+            {isConnected && (
+              <Button
+                onClick={handleRegrantAll}
+                size="sm"
+                variant="outline"
+                className="gap-2"
+                disabled={isRegranting}
+                data-testid={`button-regrant-${tenantType}`}
+              >
+                <KeyRound className="w-4 h-4" />
+                {isRegranting ? 'Opening…' : 'Re-grant All Permissions'}
+              </Button>
+            )}
+            <Button
+              onClick={handleConnect}
+              size="sm"
+              className="gap-2"
+              data-testid={`button-connect-tenant-${tenantType}`}
+            >
+              <Wand2 className="w-4 h-4" />
+              {isConnected ? 'Reconnect (new app reg)' : 'Connect with Microsoft'}
+            </Button>
+          </div>
         </div>
         <CardDescription>
           {isConnected
-            ? 'This tenant is connected. Grant permissions below for each migration service you need.'
+            ? allGranted
+              ? 'All permissions are granted. Use "Re-grant All Permissions" to renew consent with the same app registration if it ever expires.'
+              : 'This tenant is connected. Grant permissions below for each migration service you need, or click "Re-grant All Permissions" to consent to everything at once.'
             : 'Click "Connect with Microsoft" to sign in as a Global Admin and automatically set up the app registration.'}
         </CardDescription>
       </CardHeader>
@@ -2153,6 +2235,7 @@ function TenantConfigTab({ projectId, project }: { projectId: number; project: a
           tenantId={project.sourceTenantId}
           clientId={project.sourceClientId}
           clientSecret={project.sourceClientSecret}
+          consentedServices={project.sourceConsentedServices}
         />
         <TenantCredentialForm
           label="Target Tenant"
@@ -2161,6 +2244,7 @@ function TenantConfigTab({ projectId, project }: { projectId: number; project: a
           tenantId={project.targetTenantId}
           clientId={project.targetClientId}
           clientSecret={project.targetClientSecret}
+          consentedServices={project.targetConsentedServices}
         />
       </div>
     </div>

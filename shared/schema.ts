@@ -28,6 +28,9 @@ export const migrationProjects = pgTable("migration_projects", {
   adBaseDn: text("ad_base_dn"),
   adUseSsl: boolean("ad_use_ssl").default(false),
   adTargetOu: text("ad_target_ou"),
+  // Persisted consent tracking — JSON arrays of ServiceKey strings
+  sourceConsentedServices: text("source_consented_services"),
+  targetConsentedServices: text("target_consented_services"),
 });
 
 // === MIGRATION ITEMS (Users/Resources to migrate) ===

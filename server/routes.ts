@@ -9,7 +9,7 @@ import { migrateItem, migrateAllPending } from "./services/migration-engine";
 import { GraphClient } from "./services/graph-client";
 import { discoverUsers, discoverSharePointSites, discoverTeams, discoverPowerPlatform, discoverOneDrives, discoverDistributionGroups, discoverSharedMailboxes, discoverM365Groups } from "./services/discovery-service";
 import { discoverCloudOnlyUsers, testAdConnection, migrateUserToAd, generatePowerShellScript, type AdConnectionConfig } from "./services/entra-ad-service";
-import { buildConnectUrl, handleOAuthCallback, buildConsentUrl, SERVICE_PERMISSION_GROUPS, type ServiceKey } from "./services/oauth-tenant-service";
+import { buildConnectUrl, handleOAuthCallback, buildConsentUrl, buildRegrantConsentUrl, decodeConsentState, SERVICE_PERMISSION_GROUPS, type ServiceKey } from "./services/oauth-tenant-service";
 
 function maskSecret(value: string | null): string | null {
   if (!value) return null;
@@ -582,18 +582,35 @@ export async function registerRoutes(
   });
 
   // Consent callback — close popup and notify parent window
-  app.get('/oauth/consent-complete', (req, res) => {
-    const { error, error_description, admin_consent } = req.query as Record<string, string>;
+  app.get('/oauth/consent-complete', async (req, res) => {
+    const { error, error_description, admin_consent, state } = req.query as Record<string, string>;
     if (error) {
       const msg = error_description || error;
       if (msg?.includes('500113') || msg?.includes('reply address')) {
-        // Guide user to reconnect
         const fixMsg = 'The app registration is missing a reply URL. Please click "Connect with Microsoft" again to re-register this tenant, then retry granting permissions.';
         res.send(`<html><body style="font-family:sans-serif;padding:2rem"><script>window.opener?.postMessage({type:'consent_error',error:${JSON.stringify(fixMsg)}},location.origin);window.close();</script><h3>Setup Required</h3><p>${fixMsg}</p></body></html>`);
       } else {
         res.send(`<html><body style="font-family:sans-serif;padding:2rem"><script>window.opener?.postMessage({type:'consent_error',error:${JSON.stringify(msg)}},location.origin);window.close();</script><h3>Error granting consent</h3><p>${msg}</p></body></html>`);
       }
-    } else if (admin_consent === 'True' || admin_consent === 'true') {
+      return;
+    }
+
+    // Persist consent to DB when admin_consent=True and we have a valid state token
+    if ((admin_consent === 'True' || admin_consent === 'true') && state) {
+      try {
+        const cs = decodeConsentState(state);
+        if (cs) {
+          const project = await storage.getProjectInternal(cs.projectId);
+          if (project) {
+            const allServiceKeys = Object.keys(SERVICE_PERMISSION_GROUPS);
+            const field = cs.tenantType === 'source' ? 'sourceConsentedServices' : 'targetConsentedServices';
+            await storage.updateProjectInternal(cs.projectId, { [field]: JSON.stringify(allServiceKeys) });
+          }
+        }
+      } catch { /* non-fatal — consent was still granted, just not persisted */ }
+    }
+
+    if (admin_consent === 'True' || admin_consent === 'true') {
       res.send(`<html><body style="font-family:sans-serif;padding:2rem"><script>window.opener?.postMessage({type:'consent_success'},location.origin);window.close();</script><h3>✓ Permissions granted</h3><p>Admin consent was successfully granted. You can close this window.</p></body></html>`);
     } else {
       res.send(`<html><body style="font-family:sans-serif;padding:2rem"><script>window.opener?.postMessage({type:'consent_success'},location.origin);window.close();</script><h3>Done</h3><p>You can close this window.</p></body></html>`);
@@ -605,16 +622,36 @@ export async function registerRoutes(
     res.json(SERVICE_PERMISSION_GROUPS);
   });
 
-  // Build consent URL for a specific service
+  // Build consent URL for a specific service (includes projectId+tenantType in state for DB persistence)
   app.get('/api/oauth/consent-url', requireAuth, (req, res) => {
-    const { tenantId, clientId, service } = req.query as Record<string, string>;
+    const { tenantId, clientId, service, projectId, tenantType } = req.query as Record<string, string>;
     if (!tenantId || !clientId || !service) {
       return res.status(400).json({ message: 'tenantId, clientId, and service are required' });
     }
     if (!(service in SERVICE_PERMISSION_GROUPS)) {
       return res.status(400).json({ message: 'Invalid service key' });
     }
-    const url = buildConsentUrl(tenantId, clientId, service as ServiceKey);
+    const pid = projectId ? Number(projectId) : undefined;
+    const tt = tenantType === 'source' || tenantType === 'target' ? tenantType : undefined;
+    const url = buildConsentUrl(tenantId, clientId, service as ServiceKey, pid, tt);
+    res.json({ url });
+  });
+
+  // Build a re-grant consent URL using the existing app registration (no new OAuth flow)
+  app.get('/api/oauth/regrant-url', requireAuth, async (req, res) => {
+    const { projectId, tenantType } = req.query as Record<string, string>;
+    if (!projectId || !tenantType) {
+      return res.status(400).json({ message: 'projectId and tenantType are required' });
+    }
+    if (tenantType !== 'source' && tenantType !== 'target') {
+      return res.status(400).json({ message: 'tenantType must be source or target' });
+    }
+    const project = await storage.getProject(Number(projectId), (req as any).user?.id);
+    if (!project) return res.status(404).json({ message: 'Project not found' });
+    const tenantId = tenantType === 'source' ? project.sourceTenantId : project.targetTenantId;
+    const clientId = tenantType === 'source' ? project.sourceClientId : project.targetClientId;
+    if (!clientId) return res.status(400).json({ message: 'No app registration found for this tenant. Connect with Microsoft first.' });
+    const url = buildRegrantConsentUrl(tenantId, clientId, Number(projectId), tenantType);
     res.json({ url });
   });
 
