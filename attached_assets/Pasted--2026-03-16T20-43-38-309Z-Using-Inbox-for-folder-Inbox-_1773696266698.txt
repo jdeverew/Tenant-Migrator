@@ -1,0 +1,34 @@
+[2026-03-16T20:43:38.309Z] Using Inbox for folder "Inbox": Graph API GET /users/james@techtrainerdev.onmicrosoft.com/mailFolders?$filter=displayName eq 'Inbox' failed (404): {"error":{"code":"ErrorInvalidUser","message":"The requested user 'james@techtrainerdev.onmicrosoft.com' is invalid."}}
+[2026-03-16T20:43:38.414Z] Cannot access Inbox for target user, skipping folder "Inbox"
+[2026-03-16T20:43:38.414Z] Processing folder: Junk Email
+[2026-03-16T20:43:39.336Z] Using Inbox for folder "Junk Email": Graph API GET /users/james@techtrainerdev.onmicrosoft.com/mailFolders?$filter=displayName eq 'Junk Email' failed (404): {"error":{"code":"ErrorInvalidUser","message":"The requested user 'james@techtrainerdev.onmicrosoft.com' is invalid."}}
+[2026-03-16T20:43:39.546Z] Cannot access Inbox for target user, skipping folder "Junk Email"
+[2026-03-16T20:43:39.546Z] Processing folder: Outbox
+[2026-03-16T20:43:40.388Z] Using Inbox for folder "Outbox": Graph API GET /users/james@techtrainerdev.onmicrosoft.com/mailFolders?$filter=displayName eq 'Outbox' failed (404): {"error":{"code":"ErrorInvalidUser","message":"The requested user 'james@techtrainerdev.onmicrosoft.com' is invalid."}}
+[2026-03-16T20:43:41.381Z] Cannot access Inbox for target user, skipping folder "Outbox"
+[2026-03-16T20:43:41.381Z] Processing folder: RSS Feeds
+[2026-03-16T20:43:42.492Z] Using Inbox for folder "RSS Feeds": Graph API GET /users/james@techtrainerdev.onmicrosoft.com/mailFolders?$filter=displayName eq 'RSS Feeds' failed (404): {"error":{"code":"ErrorInvalidUser","message":"The requested user 'james@techtrainerdev.onmicrosoft.com' is invalid."}}
+[2026-03-16T20:43:43.386Z] Cannot access Inbox for target user, skipping folder "RSS Feeds"
+[2026-03-16T20:43:43.386Z] Processing folder: Sent Items
+[2026-03-16T20:43:43.509Z] Using Inbox for folder "Sent Items": Graph API GET /users/james@techtrainerdev.onmicrosoft.com/mailFolders?$filter=displayName eq 'Sent Items' failed (404): {"error":{"code":"ErrorInvalidUser","message":"The requested user 'james@techtrainerdev.onmicrosoft.com' is invalid."}}
+[2026-03-16T20:43:44.381Z] Cannot access Inbox for target user, skipping folder "Sent Items"
+[2026-03-16T20:43:44.381Z] Processing folder: Sync Issues
+[2026-03-16T20:43:44.518Z] Using Inbox for folder "Sync Issues": Graph API GET /users/james@techtrainerdev.onmicrosoft.com/mailFolders?$filter=displayName eq 'Sync Issues' failed (404): {"error":{"code":"ErrorInvalidUser","message":"The requested user 'james@techtrainerdev.onmicrosoft.com' is invalid."}}
+[2026-03-16T20:43:45.447Z] Cannot access Inbox for target user, skipping folder "Sync Issues"
+[2026-03-16T20:43:45.447Z] Messages complete: 0 migrated, 0 failed out of 0
+[2026-03-16T20:43:45.455Z] ── Migrating calendar events...
+[2026-03-16T20:43:46.436Z] Calendar migration skipped: Graph API GET /users/james@techtrainerdev.onmicrosoft.com/calendars failed (403): {"error":{"code":"ErrorAccessDenied","message":"Access is denied. Check credentials and try again."}}
+[2026-03-16T20:43:46.436Z] ── Migrating contacts...
+[2026-03-16T20:43:47.353Z] Contacts migration skipped: Graph API GET /users/james@techtrainerdev.onmicrosoft.com/contacts?$top=100 failed (403): {"error":{"code":"ErrorAccessDenied","message":"Access is denied. Check credentials and try again."}}
+[2026-03-16T20:43:47.353Z] ── Migrating tasks (Microsoft To Do)...
+[2026-03-16T20:43:47.466Z] Tasks migration skipped: Graph API GET /users/james@techtrainerdev.onmicrosoft.com/todo/lists failed (401): {"error":{"code":"UnknownError","message":"","innerError":{"date":"2026-03-16T20:43:45","request-id":"03e681b6-7ec2-4e54-89bc-62c8d95d86a4","client-request-id":"03e681b6-7ec2-4e54-89bc-62c8d95d86a4"}}}
+[2026-03-16T20:43:47.466Z] ── Migrating mailbox rules...
+[2026-03-16T20:43:48.478Z] Mailbox rules migration skipped: Graph API GET /users/james@techtrainerdev.onmicrosoft.com/mailFolders/inbox/messageRules failed (403): {"error":{"code":"ErrorAccessDenied","message":"Access is denied. Check credentials and try again."}}
+[2026-03-16T20:43:48.478Z] ── Migrating mailbox settings (OOO, timezone, working hours)...
+[2026-03-16T20:43:49.365Z] Mailbox settings migration skipped: Graph API GET /users/james@techtrainerdev.onmicrosoft.com/mailboxSettings failed (403): {"error":{"code":"ErrorAccessDenied","message":"Access is denied. Check credentials and try again."}}
+[2026-03-16T20:43:49.365Z] ── Migrating Outlook categories...
+[2026-03-16T20:43:49.420Z] Categories migration skipped: Graph API GET /users/james@techtrainerdev.onmicrosoft.com/outlook/masterCategories failed (403): {"error":{"code":"ErrorAccessDenied","message":"Access is denied. Check credentials and try again."}}
+[2026-03-16T20:43:49.420Z] Note: Email signatures and full mailbox delegate permissions cannot be migrated — Microsoft Graph API does not expose these endpoints.
+[2026-03-16T20:43:49.420Z] ✓ Mailbox migration complete
+[2026-03-16T21:20:27.305Z] [SYNC] Target user james@techtrainerdev.onmicrosoft.com not found — skipping mailbox sync
+[2026-03-16T21:22:32.112Z] [SYNC] Target user james@techtrainerdev.onmicrosoft.com not found — skipping mailbox sync

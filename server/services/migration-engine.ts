@@ -98,6 +98,24 @@ async function migrateMailbox(
   await updateItemProgress(itemId, 'in_progress', logs);
 
   try {
+    // ── Verify target user exists before doing anything ───────────────────
+    logs.push(logEntry(`Verifying target user exists: ${targetUser}`));
+    await updateItemProgress(itemId, 'in_progress', logs);
+    const targetUserObj = await target.get(`/users/${encodeURIComponent(targetUser)}?$select=id,userPrincipalName,assignedLicenses`).catch(() => null);
+    if (!targetUserObj) {
+      throw new Error(
+        `Target user "${targetUser}" does not exist in the target tenant. ` +
+        `Create the user account first (via the Users migration tab or manually in the target tenant's admin centre), then re-run this mailbox migration. ` +
+        `Alternatively, verify the "Target identity" field on this item is set to the correct UPN.`
+      );
+    }
+    const hasLicense = Array.isArray(targetUserObj.assignedLicenses) && targetUserObj.assignedLicenses.length > 0;
+    if (!hasLicense) {
+      logs.push(logEntry(`⚠ Target user has no Microsoft 365 license assigned. Mailbox migration requires a license that includes Exchange Online (e.g. M365 Business Basic/Standard/Premium, E1/E3/E5). Assign a license in the target admin centre, wait ~5 minutes for the mailbox to provision, then re-run.`));
+    }
+    logs.push(logEntry(`✓ Target user found: ${targetUserObj.userPrincipalName}`));
+
+    // ── Fetch source folders ──────────────────────────────────────────────
     logs.push(logEntry("Fetching mail folders from source..."));
     await updateItemProgress(itemId, 'in_progress', logs);
 
@@ -118,7 +136,7 @@ async function migrateMailbox(
 
       let targetFolderId: string;
       try {
-        const targetFolders = await target.get(`/users/${targetUser}/mailFolders?$filter=displayName eq '${folderName}'`);
+        const targetFolders = await target.get(`/users/${targetUser}/mailFolders?$filter=displayName eq '${folderName.replace(/'/g, "''")}'`);
         if (targetFolders.value && targetFolders.value.length > 0) {
           targetFolderId = targetFolders.value[0].id;
         } else {
@@ -129,12 +147,13 @@ async function migrateMailbox(
           logs.push(logEntry(`Created folder "${folderName}" in target`));
         }
       } catch (err: any) {
-        logs.push(logEntry(`Using Inbox for folder "${folderName}": ${err.message}`));
+        // Fall back to well-known Inbox — note the error but continue
+        logs.push(logEntry(`Could not access/create folder "${folderName}" in target — placing messages in Inbox. Error: ${err.message}`));
         try {
           const inbox = await target.get(`/users/${targetUser}/mailFolders/Inbox`);
           targetFolderId = inbox.id;
         } catch {
-          logs.push(logEntry(`Cannot access Inbox for target user, skipping folder "${folderName}"`));
+          logs.push(logEntry(`Cannot access target mailbox at all — skipping folder "${folderName}". Check Mail.ReadWrite Application permission on the TARGET app registration.`));
           continue;
         }
       }
@@ -152,15 +171,16 @@ async function migrateMailbox(
             const newMessage: any = {
               subject: msg.subject || "(No Subject)",
               body: msg.body,
-              from: msg.from,
               toRecipients: msg.toRecipients || [],
               ccRecipients: msg.ccRecipients || [],
               bccRecipients: msg.bccRecipients || [],
-              receivedDateTime: msg.receivedDateTime,
               importance: msg.importance || "normal",
               isRead: msg.isRead !== undefined ? msg.isRead : true,
+              isDraft: false,
               flag: msg.flag || { flagStatus: 'notFlagged' },
             };
+            // Note: receivedDateTime and internetMessageId are read-only in Graph API
+            // and cannot be set when creating messages. The copy will show today's date.
 
             const createdMsg = await target.post(`/users/${targetUser}/mailFolders/${targetFolderId}/messages`, newMessage);
 
@@ -229,7 +249,8 @@ async function migrateMailbox(
       }
       logs.push(logEntry(`Calendar: ${calMigrated} events migrated, ${calFailed} failed out of ${calTotal}`));
     } catch (e: any) {
-      logs.push(logEntry(`Calendar migration skipped: ${e.message}`));
+      const is403 = e.message?.includes('403') || e.message?.toLowerCase().includes('access is denied');
+      logs.push(logEntry(`Calendar migration skipped: ${e.message}${is403 ? ' — Grant Calendars.ReadWrite (Application) on BOTH tenant app registrations and re-run admin consent.' : ''}`));
     }
 
     // ── CONTACTS ─────────────────────────────────────────────────────────────
@@ -259,7 +280,8 @@ async function migrateMailbox(
       }
       logs.push(logEntry(`Contacts: ${cntMigrated} migrated, ${cntFailed} failed out of ${contacts.length}`));
     } catch (e: any) {
-      logs.push(logEntry(`Contacts migration skipped: ${e.message}`));
+      const is403 = e.message?.includes('403') || e.message?.toLowerCase().includes('access is denied');
+      logs.push(logEntry(`Contacts migration skipped: ${e.message}${is403 ? ' — Grant Contacts.ReadWrite (Application) on BOTH tenant app registrations and re-run admin consent.' : ''}`));
     }
 
     // ── TASKS (Microsoft To Do) ───────────────────────────────────────────────
@@ -297,7 +319,8 @@ async function migrateMailbox(
       }
       logs.push(logEntry(`Tasks: ${taskMigrated} migrated, ${taskFailed} failed out of ${taskTotal}`));
     } catch (e: any) {
-      logs.push(logEntry(`Tasks migration skipped: ${e.message}`));
+      const is401or403 = e.message?.includes('401') || e.message?.includes('403') || e.message?.toLowerCase().includes('access is denied');
+      logs.push(logEntry(`Tasks migration skipped: ${e.message}${is401or403 ? ' — Grant Tasks.ReadWrite (Application) on BOTH tenant app registrations and re-run admin consent.' : ''}`));
     }
 
     // ── MAILBOX RULES ─────────────────────────────────────────────────────────
@@ -321,7 +344,8 @@ async function migrateMailbox(
       }
       logs.push(logEntry(`Mailbox rules: ${rulesMigrated} migrated, ${rulesFailed} failed`));
     } catch (e: any) {
-      logs.push(logEntry(`Mailbox rules migration skipped: ${e.message}`));
+      const is403 = e.message?.includes('403') || e.message?.toLowerCase().includes('access is denied');
+      logs.push(logEntry(`Mailbox rules migration skipped: ${e.message}${is403 ? ' — Grant MailboxSettings.ReadWrite (Application) on BOTH tenant app registrations and re-run admin consent.' : ''}`));
     }
 
     // ── OUT-OF-OFFICE / MAILBOX SETTINGS ────────────────────────────────────
@@ -341,7 +365,8 @@ async function migrateMailbox(
         logs.push(logEntry('Mailbox settings migrated (auto-reply, timezone, working hours, language)'));
       }
     } catch (e: any) {
-      logs.push(logEntry(`Mailbox settings migration skipped: ${e.message}`));
+      const is403 = e.message?.includes('403') || e.message?.toLowerCase().includes('access is denied');
+      logs.push(logEntry(`Mailbox settings migration skipped: ${e.message}${is403 ? ' — Grant MailboxSettings.ReadWrite (Application) on BOTH tenant app registrations and re-run admin consent.' : ''}`));
     }
 
     // ── CATEGORIES ───────────────────────────────────────────────────────────
@@ -362,7 +387,8 @@ async function migrateMailbox(
       if (catMigrated > 0) logs.push(logEntry(`Categories: ${catMigrated} migrated`));
       else logs.push(logEntry('Categories: none to migrate or already exist'));
     } catch (e: any) {
-      logs.push(logEntry(`Categories migration skipped: ${e.message}`));
+      const is403 = e.message?.includes('403') || e.message?.toLowerCase().includes('access is denied');
+      logs.push(logEntry(`Categories migration skipped: ${e.message}${is403 ? ' — Grant MailboxSettings.ReadWrite (Application) on BOTH tenant app registrations and re-run admin consent.' : ''}`));
     }
 
     // ── API LIMITATIONS NOTE ────────────────────────────────────────────────
