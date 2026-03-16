@@ -190,7 +190,15 @@ export async function registerRoutes(
       }
 
       requestCancellation(itemId);
-      res.json({ message: 'Cancellation requested — migration will stop at the next safe checkpoint.' });
+      // Immediately mark as cancelled in DB so the UI reflects it at once.
+      // The background migration loop will also hit checkCancellation() and exit cleanly.
+      const existingLogs = item.logs || [];
+      await storage.updateItem(itemId, { status: 'cancelled', errorDetails: null });
+      await storage.updateItemLogs(itemId, [
+        ...existingLogs,
+        `[${new Date().toISOString()}] Migration cancelled by user — stopping at next safe checkpoint.`,
+      ]);
+      res.json({ message: 'Migration stopped.' });
     } catch (err: any) {
       res.status(500).json({ message: err.message || 'Internal server error' });
     }

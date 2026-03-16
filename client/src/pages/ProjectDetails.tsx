@@ -243,14 +243,13 @@ export default function ProjectDetails() {
   };
 
   const handleCancelItem = async (itemId: number) => {
-    if (!confirm("Stop this migration? It will halt at the next safe checkpoint and the item will be marked as cancelled. You can re-run it later.")) return;
     try {
-      const res = await apiRequest('POST', `/api/projects/${id}/items/${itemId}/cancel`);
-      const data = await res.json();
-      toast({ title: "Cancellation Requested", description: data.message });
+      await apiRequest('POST', `/api/projects/${id}/items/${itemId}/cancel`);
+      toast({ title: "Migration Stopped", description: "The migration has been cancelled. You can re-run it at any time." });
       queryClient.invalidateQueries({ queryKey: [api.items.list.path, id] });
+      queryClient.invalidateQueries({ queryKey: [api.projects.stats.path, id] });
     } catch (err: any) {
-      toast({ title: "Error", description: err.message || "Failed to cancel migration", variant: "destructive" });
+      toast({ title: "Error", description: err.message || "Failed to stop migration", variant: "destructive" });
     }
   };
 

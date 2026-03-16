@@ -28,6 +28,13 @@ async function updateItemProgress(
   errorDetails?: string,
   bytes?: { bytesMigrated: number; bytesTotal: number }
 ) {
+  // If the user cancelled the item via the API, the DB status is already 'cancelled'.
+  // Don't let the still-running background loop overwrite that with 'in_progress' or 'completed'.
+  if (status !== 'cancelled' && status !== 'failed') {
+    const current = await storage.getItem(itemId);
+    if (current?.status === 'cancelled') return;
+  }
+
   const progressPercent = bytes && bytes.bytesTotal > 0
     ? Math.min(100, Math.round((bytes.bytesMigrated / bytes.bytesTotal) * 100))
     : undefined;
@@ -1750,14 +1757,23 @@ export async function migrateItem(projectId: number, itemId: number): Promise<vo
     }
   } catch (err: any) {
     if (err instanceof CancelledError) {
-      await storage.updateItem(itemId, { status: 'cancelled', errorDetails: null });
-      await storage.updateItemLogs(itemId, [logEntry('Migration was cancelled by user.')]);
+      // The cancel route already set status='cancelled' and wrote the logs.
+      // Only update if the DB somehow still shows in_progress (belt-and-suspenders).
+      const current = await storage.getItem(itemId);
+      if (current?.status !== 'cancelled') {
+        await storage.updateItem(itemId, { status: 'cancelled', errorDetails: null });
+        await storage.updateItemLogs(itemId, [logEntry('Migration was cancelled by user.')]);
+      }
     } else {
-      await storage.updateItem(itemId, {
-        status: 'failed',
-        errorDetails: err.message,
-      });
-      await storage.updateItemLogs(itemId, [logEntry(`Migration failed: ${err.message}`)]);
+      // Don't overwrite a user-cancelled item with 'failed'
+      const current = await storage.getItem(itemId);
+      if (current?.status !== 'cancelled') {
+        await storage.updateItem(itemId, {
+          status: 'failed',
+          errorDetails: err.message,
+        });
+        await storage.updateItemLogs(itemId, [logEntry(`Migration failed: ${err.message}`)]);
+      }
     }
   }
 }
