@@ -1002,37 +1002,63 @@ function DiscoveryTab({ projectId, onImport }: DiscoveryTabProps) {
     });
   };
 
-  const handleImportSelected = () => {
+  const handleImportSelected = async () => {
     const selectedItems = results.filter(r => selected.has(r.id));
-    const items = selectedItems.map(r => {
-      let sourceIdentity = '';
-      let targetIdentity = '';
-      let itemType = activeType === 'users' ? 'user' : activeType === 'sharepoint' ? 'sharepoint' : activeType === 'teams' ? 'teams' : 'powerplatform';
+    if (selectedItems.length === 0) return;
 
-      if (activeType === 'users') {
-        sourceIdentity = r.userPrincipalName;
-        targetIdentity = targetSuffix ? r.userPrincipalName.replace(/@.*/, `@${targetSuffix}`) : '';
-      } else if (activeType === 'sharepoint') {
-        sourceIdentity = r.webUrl;
-        targetIdentity = targetSuffix || '';
-      } else if (activeType === 'teams') {
-        sourceIdentity = r.id;
-        targetIdentity = r.displayName;
-      } else {
-        sourceIdentity = r.id;
-        targetIdentity = '';
+    setLoading(true);
+    try {
+      // Build source identities for mapping
+      const sourceIdentities = selectedItems.map(r => {
+        if (activeType === 'users') return r.userPrincipalName;
+        if (activeType === 'sharepoint') return r.webUrl;
+        return r.id;
+      });
+
+      // Apply configured mapping rules from the server
+      let mappedTargets: Record<string, string> = {};
+      try {
+        const res = await apiRequest('POST', `/api/projects/${projectId}/apply-mapping`, { identities: sourceIdentities });
+        const mappingResults: { source: string; target: string }[] = await res.json();
+        mappingResults.forEach(({ source, target }) => { mappedTargets[source] = target; });
+      } catch {
+        // If mapping API fails, continue without mapped targets
       }
 
-      return {
-        projectId,
-        sourceIdentity,
-        targetIdentity: targetIdentity || undefined,
-        itemType,
-        status: 'pending',
-      };
-    });
-    onImport(items);
-    setSelected(new Set());
+      const items = selectedItems.map(r => {
+        const itemType = activeType === 'users' ? 'user' : activeType === 'sharepoint' ? 'sharepoint' : activeType === 'teams' ? 'teams' : 'powerplatform';
+        let sourceIdentity = '';
+        let targetIdentity = '';
+
+        if (activeType === 'users') {
+          sourceIdentity = r.userPrincipalName;
+          // Use mapping rule result; if unchanged (no rule matched), fall back to targetSuffix
+          const mapped = mappedTargets[sourceIdentity];
+          if (mapped && mapped !== sourceIdentity) {
+            targetIdentity = mapped;
+          } else if (targetSuffix) {
+            targetIdentity = sourceIdentity.replace(/@.*/, `@${targetSuffix}`);
+          }
+        } else if (activeType === 'sharepoint') {
+          sourceIdentity = r.webUrl;
+          const mapped = mappedTargets[sourceIdentity];
+          targetIdentity = (mapped && mapped !== sourceIdentity) ? mapped : (targetSuffix || '');
+        } else if (activeType === 'teams') {
+          sourceIdentity = r.id;
+          targetIdentity = r.displayName;
+        } else {
+          sourceIdentity = r.id;
+          targetIdentity = '';
+        }
+
+        return { projectId, sourceIdentity, targetIdentity: targetIdentity || undefined, itemType, status: 'pending' };
+      });
+
+      onImport(items);
+      setSelected(new Set());
+    } finally {
+      setLoading(false);
+    }
   };
 
   const activeTypeConfig = discoveryTypes.find(t => t.id === activeType)!;
@@ -1071,7 +1097,7 @@ function DiscoveryTab({ projectId, onImport }: DiscoveryTabProps) {
           <div className="flex flex-wrap gap-3 items-end">
             {(activeType === 'users') && (
               <div className="space-y-1 flex-1 min-w-[200px]">
-                <Label>Target domain suffix (optional)</Label>
+                <Label>Fallback target domain <span className="text-muted-foreground font-normal">(used only if no mapping rule matches)</span></Label>
                 <Input
                   placeholder="contoso.com"
                   value={targetSuffix}
