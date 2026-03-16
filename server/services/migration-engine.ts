@@ -1170,19 +1170,37 @@ async function resolveUserInTenant(client: GraphClient, upn: string): Promise<st
 }
 
 // ── Helper: resolve a group in a tenant by mail/displayName, return group object ──
+// Throws a descriptive error on permission failures; returns null only if genuinely not found.
 async function resolveGroupInTenant(client: GraphClient, identity: string): Promise<any | null> {
-  // Try by ID first
-  try { const g = await client.get(`/groups/${identity}`); if (g?.id) return g; } catch { }
-  // Try by mail
+  const sel = `$select=id,displayName,mail,mailNickname,description,visibility,groupTypes`;
+
+  // 1. Try direct ID lookup (works only for GUIDs)
+  try { const g = await client.get(`/groups/${identity}?${sel}`); if (g?.id) return g; } catch { /* not a GUID or not found */ }
+
+  const safeId = identity.replace(/'/g, "''");
+
+  // 2. Try by mail address (basic filter — no ConsistencyLevel needed)
   try {
-    const res = await client.get(`/groups?$filter=mail eq '${identity.replace(/'/g, "''")}'&$select=id,displayName,mail,mailNickname,description,visibility,groupTypes`);
+    const res = await client.get(`/groups?$filter=mail eq '${safeId}'&${sel}`);
     if (res.value?.length) return res.value[0];
-  } catch { }
-  // Try by displayName
+  } catch (e: any) {
+    if (e.message?.includes('403') || e.message?.toLowerCase().includes('insufficient') || e.message?.toLowerCase().includes('authorization')) {
+      throw new Error(`Permission denied reading groups: ${e.message}. Ensure Group.Read.All or Group.ReadWrite.All admin consent has been granted.`);
+    }
+    // Otherwise (400/404/etc.) fall through and try next method
+  }
+
+  // 3. Try by displayName — MUST use ConsistencyLevel:eventual (advanced query requirement)
   try {
-    const res = await client.get(`/groups?$filter=displayName eq '${identity.replace(/'/g, "''")}'&$select=id,displayName,mail,mailNickname,description,visibility,groupTypes`);
+    const res = await client.getAdvanced(`/groups?$filter=displayName eq '${safeId}'&$count=true&${sel}`);
     if (res.value?.length) return res.value[0];
-  } catch { }
+  } catch (e: any) {
+    if (e.message?.includes('403') || e.message?.toLowerCase().includes('insufficient') || e.message?.toLowerCase().includes('authorization')) {
+      throw new Error(`Permission denied reading groups: ${e.message}. Ensure Group.Read.All or Group.ReadWrite.All admin consent has been granted.`);
+    }
+    // Log but don't throw — return null below so caller can surface the error
+  }
+
   return null;
 }
 
@@ -1201,7 +1219,11 @@ async function migrateDistributionGroup(
   try {
     // Resolve source group
     const sourceGroup = await resolveGroupInTenant(source, sourceIdentity);
-    if (!sourceGroup) throw new Error(`Source distribution group "${sourceIdentity}" not found`);
+    if (!sourceGroup) throw new Error(
+      `Source distribution group "${sourceIdentity}" not found. ` +
+      `Searched by mail address and display name. ` +
+      `Confirm the group exists in the source tenant and that the app registration has Group.Read.All consent.`
+    );
     logs.push(logEntry(`Found source group: ${sourceGroup.displayName} (${sourceGroup.mail || 'no mail'})`));
 
     // Get members and owners
@@ -1332,14 +1354,36 @@ async function migrateSharedMailbox(
   await updateItemProgress(itemId, 'in_progress', logs);
 
   try {
-    // Resolve source mailbox (it's a user object in Graph)
-    const sourceUser = await source.get(`/users/${encodeURIComponent(sourceIdentity)}?$select=id,displayName,givenName,surname,mail,userPrincipalName,usageLocation`).catch(() => null);
-    if (!sourceUser) throw new Error(`Source shared mailbox "${sourceIdentity}" not found`);
+    // Resolve source mailbox (shared mailboxes are user objects in Graph)
+    let sourceLookupError: string | null = null;
+    const sourceUser = await source
+      .get(`/users/${encodeURIComponent(sourceIdentity)}?$select=id,displayName,givenName,surname,mail,userPrincipalName,usageLocation`)
+      .catch((e: any) => { sourceLookupError = e.message; return null; });
+
+    if (!sourceUser) {
+      const hint = sourceLookupError?.includes('403') || sourceLookupError?.toLowerCase().includes('insufficient')
+        ? ' (Permission denied — ensure User.Read.All is granted for the source tenant)'
+        : sourceLookupError
+          ? ` (API error: ${sourceLookupError})`
+          : ' (account not found — check that the UPN is correct)';
+      throw new Error(`Source shared mailbox "${sourceIdentity}" not found${hint}`);
+    }
     logs.push(logEntry(`Found source mailbox: ${sourceUser.displayName} (${sourceUser.mail})`));
 
     const targetUpn = targetIdentity || sourceIdentity;
+    const targetDomain = targetUpn.split('@')[1] || '';
     const mailNickname = targetUpn.split('@')[0].replace(/[^a-zA-Z0-9]/g, '') || 'sm' + Date.now();
     const tempPassword = `Migr@tion${Math.random().toString(36).slice(-6).toUpperCase()}1!`;
+
+    // Warn if the target UPN domain looks like the source domain (no mapping rule applied)
+    const sourceDomain = sourceIdentity.split('@')[1] || '';
+    if (targetDomain && sourceDomain && targetDomain.toLowerCase() === sourceDomain.toLowerCase()) {
+      logs.push(logEntry(
+        `⚠ Target UPN uses the source domain "${targetDomain}". ` +
+        `Unless "${targetDomain}" is a verified domain in the target tenant, user creation will fail. ` +
+        `Use mapping rules to change the target address to a domain verified in the target tenant.`
+      ));
+    }
 
     // Check if target user already exists
     let targetUser = await target.get(`/users/${encodeURIComponent(targetUpn)}?$select=id,userPrincipalName`).catch(() => null);
@@ -1355,7 +1399,21 @@ async function migrateSharedMailbox(
       };
       if (sourceUser.givenName) payload.givenName = sourceUser.givenName;
       if (sourceUser.surname) payload.surname = sourceUser.surname;
-      targetUser = await target.post('/users', payload);
+      try {
+        targetUser = await target.post('/users', payload);
+      } catch (e: any) {
+        const isDomainError = e.message?.toLowerCase().includes('domain') && (e.message?.toLowerCase().includes('verified') || e.message?.toLowerCase().includes('not present') || e.message?.toLowerCase().includes('available'));
+        const isPasswordError = e.message?.toLowerCase().includes('password');
+        if (isDomainError) {
+          throw new Error(
+            `Cannot create user with UPN "${targetUpn}": the domain "${targetDomain}" is not a verified domain in the target tenant. ` +
+            `Add a mapping rule to map this shared mailbox to an address in a domain that IS verified in the target tenant, then re-run.`
+          );
+        } else if (isPasswordError) {
+          throw new Error(`User creation failed (password policy): ${e.message}. Try setting a stronger password or check the target tenant's password policy.`);
+        }
+        throw new Error(`Failed to create user in target tenant: ${e.message}`);
+      }
       logs.push(logEntry(`✓ Account created (ID: ${targetUser.id})`));
       logs.push(logEntry(`⚠ After migration: convert to shared mailbox in Exchange Admin Center or run: Set-Mailbox "${targetUpn}" -Type Shared`));
       logs.push(logEntry(`  Temporary password: ${tempPassword}`));
@@ -1410,7 +1468,11 @@ async function migrateM365Group(
 
   try {
     const sourceGroup = await resolveGroupInTenant(source, sourceIdentity);
-    if (!sourceGroup) throw new Error(`Source M365 Group "${sourceIdentity}" not found`);
+    if (!sourceGroup) throw new Error(
+      `Source M365 Group "${sourceIdentity}" not found. ` +
+      `Searched by mail address and display name. ` +
+      `Confirm the group exists in the source tenant and that the app registration has Group.Read.All consent.`
+    );
     logs.push(logEntry(`Found source group: ${sourceGroup.displayName} (${sourceGroup.mail || 'no mail'})`));
 
     const members = await source.getAllPages<any>(`/groups/${sourceGroup.id}/members?$select=id,userPrincipalName,mail,displayName`);

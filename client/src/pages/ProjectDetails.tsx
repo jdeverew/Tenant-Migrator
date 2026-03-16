@@ -1295,11 +1295,11 @@ function DiscoveryTab({ projectId, onImport }: DiscoveryTabProps) {
           <div className="text-sm text-muted-foreground">{activeTypeConfig.description}</div>
 
           <div className="flex flex-wrap gap-3 items-end">
-            {(activeType === 'users' || activeType === 'onedrive') && (
+            {(activeType === 'users' || activeType === 'onedrive' || activeType === 'sharedmailboxes') && (
               <div className="space-y-1 flex-1 min-w-[200px]">
-                <Label>Fallback target domain <span className="text-muted-foreground font-normal">(used only if no mapping rule matches)</span></Label>
+                <Label>Target domain <span className="text-muted-foreground font-normal">(verified domain in target tenant — required)</span></Label>
                 <Input
-                  placeholder="contoso.com"
+                  placeholder="targetcompany.com"
                   value={targetSuffix}
                   onChange={e => setTargetSuffix(e.target.value)}
                   data-testid="input-target-domain"

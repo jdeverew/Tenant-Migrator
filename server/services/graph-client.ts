@@ -74,6 +74,16 @@ export class GraphClient {
     return res.json();
   }
 
+  // Use for endpoints that require advanced query capability (e.g. $filter=displayName on groups/users)
+  async getAdvanced(path: string): Promise<any> {
+    const res = await this.request(path, { headers: { ConsistencyLevel: 'eventual' } });
+    if (!res.ok) {
+      const err = await res.text();
+      throw new Error(`Graph API GET ${path} failed (${res.status}): ${err}`);
+    }
+    return res.json();
+  }
+
   async post(path: string, body: any): Promise<any> {
     const res = await this.request(path, {
       method: 'POST',
@@ -135,6 +145,22 @@ export class GraphClient {
 
     while (nextLink) {
       const data = await this.get(nextLink);
+      if (data.value) {
+        results.push(...data.value);
+      }
+      nextLink = data['@odata.nextLink'];
+    }
+
+    return results;
+  }
+
+  // Like getAllPages but sends ConsistencyLevel: eventual for advanced queries (NOT(), $count, etc.)
+  async getAllPagesAdvanced<T>(path: string): Promise<T[]> {
+    const results: T[] = [];
+    let nextLink: string | undefined = path;
+
+    while (nextLink) {
+      const data = await this.getAdvanced(nextLink);
       if (data.value) {
         results.push(...data.value);
       }

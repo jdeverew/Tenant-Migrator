@@ -188,11 +188,12 @@ export async function discoverDistributionGroups(client: GraphClient): Promise<D
   // Prefer server-side filter that excludes M365 Unified groups; fall back if NOT() is unsupported.
   let groups: any[] = [];
   try {
-    groups = await client.getAllPages<any>(
-      `/groups?$filter=mailEnabled eq true and NOT(groupTypes/any(c:c eq 'Unified'))&$select=${selectFields}&$top=100`
+    // NOT() on a collection property requires ConsistencyLevel: eventual
+    groups = await client.getAllPagesAdvanced<any>(
+      `/groups?$filter=mailEnabled eq true and NOT(groupTypes/any(c:c eq 'Unified'))&$count=true&$select=${selectFields}&$top=100`
     );
   } catch {
-    // Fallback: fetch both DL and mail-enabled security groups separately
+    // Fallback: simple property filters that don't need ConsistencyLevel
     const [dl, mesg] = await Promise.all([
       client.getAllPages<any>(`/groups?$filter=mailEnabled eq true and securityEnabled eq false&$select=${selectFields}&$top=100`).catch(() => [] as any[]),
       client.getAllPages<any>(`/groups?$filter=mailEnabled eq true and securityEnabled eq true&$select=${selectFields}&$top=100`).catch(() => [] as any[]),
@@ -265,9 +266,17 @@ export async function discoverSharedMailboxes(client: GraphClient): Promise<Disc
 }
 
 export async function discoverM365Groups(client: GraphClient): Promise<DiscoveredGroup[]> {
-  const groups = await client.getAllPages<any>(
-    `/groups?$filter=groupTypes/any(c:c eq 'Unified')&$select=id,displayName,mail,mailNickname,description,visibility,groupTypes&$top=100`
-  );
+  // any() lambda on groupTypes is an advanced query — requires ConsistencyLevel: eventual
+  let groups: any[] = [];
+  try {
+    groups = await client.getAllPagesAdvanced<any>(
+      `/groups?$filter=groupTypes/any(c:c eq 'Unified')&$count=true&$select=id,displayName,mail,mailNickname,description,visibility,groupTypes&$top=100`
+    );
+  } catch {
+    groups = await client.getAllPages<any>(
+      `/groups?$filter=groupTypes/any(c:c eq 'Unified')&$select=id,displayName,mail,mailNickname,description,visibility,groupTypes&$top=100`
+    ).catch(() => []);
+  }
   const results: DiscoveredGroup[] = [];
   for (const g of groups) {
     let memberCount = 0, ownerCount = 0;
