@@ -761,11 +761,11 @@ export default function ProjectDetails() {
                     )}
 
                     {/* Items table */}
-                    <div className="bg-background rounded-lg border border-border/60 shadow-sm overflow-hidden">
+                    <div className="bg-background rounded-lg border border-border/60 shadow-sm overflow-x-auto">
                       {itemsLoading ? (
                         <div className="p-8 flex justify-center"><Loader2 className="animate-spin" /></div>
                       ) : svcItems.length > 0 ? (
-                        <table className="w-full text-sm">
+                        <table className="w-full text-sm min-w-[700px]">
                           <thead>
                             <tr className="bg-muted/30 border-b border-border/60">
                               <th className="px-3 py-3 w-10">
@@ -789,7 +789,7 @@ export default function ProjectDetails() {
                               <th className="px-5 py-3 text-left font-semibold text-muted-foreground">Target</th>
                               <th className="px-5 py-3 text-left font-semibold text-muted-foreground w-52">Status</th>
                               <th className="px-5 py-3 text-left font-semibold text-muted-foreground">Progress</th>
-                              <th className="px-5 py-3 text-right font-semibold text-muted-foreground">Actions</th>
+                              <th className="px-5 py-3 text-right font-semibold text-muted-foreground sticky right-0 bg-muted/30 z-10 border-l border-border/40">Actions</th>
                             </tr>
                           </thead>
                           <tbody className="divide-y divide-border/40">
@@ -867,7 +867,7 @@ export default function ProjectDetails() {
                                     <p className="text-[11px] text-red-500">Migration failed</p>
                                   )}
                                 </td>
-                                <td className="px-5 py-3 text-right">
+                                <td className="px-5 py-3 text-right sticky right-0 bg-background border-l border-border/40 z-10">
                                   <div className="flex items-center justify-end gap-1">
                                     {/* Distribution group: toggle M365 Group mode (skip MESG attempt) */}
                                     {item.itemType === 'distributiongroup' && item.status !== 'in_progress' && (() => {
