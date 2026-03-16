@@ -2,8 +2,10 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 
 interface User {
   id: string;
-  username: string;
   email: string;
+  firstName: string | null;
+  lastName: string | null;
+  profileImageUrl?: string | null;
 }
 
 async function fetchUser(): Promise<User | null> {

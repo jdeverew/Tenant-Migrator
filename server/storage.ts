@@ -3,6 +3,7 @@ import {
   migrationProjects,
   migrationItems,
   mappingRules,
+  users,
   type Project,
   type InsertProject,
   type MigrationItem,
@@ -11,16 +12,25 @@ import {
   type UpdateItemRequest,
   type MappingRule,
   type InsertMappingRule,
+  type User,
+  type InsertUser,
 } from "@shared/schema";
 import { eq, desc, and, count } from "drizzle-orm";
 
 export interface IStorage {
+  // Users
+  getUserByEmail(email: string): Promise<User | undefined>;
+  getUserById(id: string): Promise<User | undefined>;
+  createUser(user: InsertUser): Promise<User>;
+
   // Projects
-  getProjects(userId?: string): Promise<Project[]>;
-  getProject(id: number): Promise<Project | undefined>;
+  getProjects(userId: string): Promise<Project[]>;
+  getProject(id: number, userId: string): Promise<Project | undefined>;
+  getProjectInternal(id: number): Promise<Project | undefined>;
   createProject(project: InsertProject): Promise<Project>;
-  updateProject(id: number, updates: UpdateProjectRequest): Promise<Project>;
-  deleteProject(id: number): Promise<void>;
+  updateProject(id: number, updates: UpdateProjectRequest, userId: string): Promise<Project>;
+  updateProjectInternal(id: number, updates: UpdateProjectRequest): Promise<Project>;
+  deleteProject(id: number, userId: string): Promise<void>;
   
   // Project Stats
   getProjectStats(projectId: number): Promise<{
@@ -47,14 +57,36 @@ export interface IStorage {
 }
 
 export class DatabaseStorage implements IStorage {
-  async getProjects(userId?: string): Promise<Project[]> {
-    if (userId) {
-      return await db.select().from(migrationProjects).where(eq(migrationProjects.userId, userId)).orderBy(desc(migrationProjects.createdAt));
-    }
-    return await db.select().from(migrationProjects).orderBy(desc(migrationProjects.createdAt));
+  // ── Users ────────────────────────────────────────────────────────────────
+  async getUserByEmail(email: string): Promise<User | undefined> {
+    const [user] = await db.select().from(users).where(eq(users.email, email.toLowerCase())).limit(1);
+    return user;
   }
 
-  async getProject(id: number): Promise<Project | undefined> {
+  async getUserById(id: string): Promise<User | undefined> {
+    const [user] = await db.select().from(users).where(eq(users.id, id)).limit(1);
+    return user;
+  }
+
+  async createUser(user: InsertUser): Promise<User> {
+    const [created] = await db.insert(users).values(user).returning();
+    return created;
+  }
+
+  // ── Projects ─────────────────────────────────────────────────────────────
+  async getProjects(userId: string): Promise<Project[]> {
+    return await db.select().from(migrationProjects)
+      .where(eq(migrationProjects.userId, userId))
+      .orderBy(desc(migrationProjects.createdAt));
+  }
+
+  async getProject(id: number, userId: string): Promise<Project | undefined> {
+    const [project] = await db.select().from(migrationProjects)
+      .where(and(eq(migrationProjects.id, id), eq(migrationProjects.userId, userId)));
+    return project;
+  }
+
+  async getProjectInternal(id: number): Promise<Project | undefined> {
     const [project] = await db.select().from(migrationProjects).where(eq(migrationProjects.id, id));
     return project;
   }
@@ -64,7 +96,15 @@ export class DatabaseStorage implements IStorage {
     return newProject;
   }
 
-  async updateProject(id: number, updates: UpdateProjectRequest): Promise<Project> {
+  async updateProject(id: number, updates: UpdateProjectRequest, userId: string): Promise<Project> {
+    const [updated] = await db.update(migrationProjects)
+      .set(updates)
+      .where(and(eq(migrationProjects.id, id), eq(migrationProjects.userId, userId)))
+      .returning();
+    return updated;
+  }
+
+  async updateProjectInternal(id: number, updates: UpdateProjectRequest): Promise<Project> {
     const [updated] = await db.update(migrationProjects)
       .set(updates)
       .where(eq(migrationProjects.id, id))
@@ -72,9 +112,10 @@ export class DatabaseStorage implements IStorage {
     return updated;
   }
 
-  async deleteProject(id: number): Promise<void> {
-    // Delete items first (cascade simulation if needed, but ideally DB handles this via foreign keys if configured, 
-    // strictly speaking we should delete items first to be safe or use ON DELETE CASCADE in schema)
+  async deleteProject(id: number, userId: string): Promise<void> {
+    const [project] = await db.select().from(migrationProjects)
+      .where(and(eq(migrationProjects.id, id), eq(migrationProjects.userId, userId)));
+    if (!project) return;
     await db.delete(migrationItems).where(eq(migrationItems.projectId, id));
     await db.delete(migrationProjects).where(eq(migrationProjects.id, id));
   }

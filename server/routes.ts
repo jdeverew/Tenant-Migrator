@@ -34,28 +34,29 @@ export async function registerRoutes(
   setupSession(app);
   registerAuthRoutes(app);
 
+  const getSessionUserId = (req: any): string => (req.session as any)?.user?.id;
+
   // === Projects ===
-  app.get(api.projects.list.path, async (req, res) => {
-    const projects = await storage.getProjects();
+  app.get(api.projects.list.path, requireAuth, async (req, res) => {
+    const userId = getSessionUserId(req);
+    const projects = await storage.getProjects(userId);
     res.json(projects.map(sanitizeProject));
   });
 
-  app.get(api.projects.get.path, async (req, res) => {
-    const project = await storage.getProject(Number(req.params.id));
+  app.get(api.projects.get.path, requireAuth, async (req, res) => {
+    const userId = getSessionUserId(req);
+    const project = await storage.getProject(Number(req.params.id), userId);
     if (!project) {
       return res.status(404).json({ message: 'Project not found' });
     }
     res.json(sanitizeProject(project));
   });
 
-  app.post(api.projects.create.path, async (req, res) => {
+  app.post(api.projects.create.path, requireAuth, async (req, res) => {
     try {
       const input = api.projects.create.input.parse(req.body);
-      // Optional: attach user ID from auth
-      // const userId = req.user?.claims?.sub;
-      // if (userId) input.userId = userId;
-      
-      const project = await storage.createProject(input);
+      const userId = getSessionUserId(req);
+      const project = await storage.createProject({ ...input, userId });
       res.status(201).json(sanitizeProject(project));
     } catch (err) {
       if (err instanceof z.ZodError) {
@@ -68,10 +69,11 @@ export async function registerRoutes(
     }
   });
 
-  app.patch(api.projects.update.path, async (req, res) => {
+  app.patch(api.projects.update.path, requireAuth, async (req, res) => {
     try {
       const input = api.projects.update.input.parse(req.body);
-      const project = await storage.updateProject(Number(req.params.id), input);
+      const userId = getSessionUserId(req);
+      const project = await storage.updateProject(Number(req.params.id), input, userId);
       if (!project) return res.status(404).json({ message: 'Project not found' });
       res.json(sanitizeProject(project));
     } catch (err) {
@@ -80,8 +82,9 @@ export async function registerRoutes(
     }
   });
 
-  app.delete(api.projects.delete.path, async (req, res) => {
-    await storage.deleteProject(Number(req.params.id));
+  app.delete(api.projects.delete.path, requireAuth, async (req, res) => {
+    const userId = getSessionUserId(req);
+    await storage.deleteProject(Number(req.params.id), userId);
     res.status(204).end();
   });
 
@@ -133,7 +136,7 @@ export async function registerRoutes(
       const projectId = Number(req.params.projectId);
       const itemId = Number(req.params.itemId);
 
-      const project = await storage.getProject(projectId);
+      const project = await storage.getProjectInternal(projectId);
       if (!project) return res.status(404).json({ message: 'Project not found' });
 
       const item = await storage.getItem(itemId);
@@ -157,7 +160,7 @@ export async function registerRoutes(
     try {
       const projectId = Number(req.params.projectId);
 
-      const project = await storage.getProject(projectId);
+      const project = await storage.getProjectInternal(projectId);
       if (!project) return res.status(404).json({ message: 'Project not found' });
 
       const result = await migrateAllPending(projectId);
@@ -178,8 +181,9 @@ export async function registerRoutes(
   });
 
   // === Test Connection ===
-  app.post('/api/projects/:id/test-connection', async (req, res) => {
-    const project = await storage.getProject(Number(req.params.id));
+  app.post('/api/projects/:id/test-connection', requireAuth, async (req, res) => {
+    const userId = getSessionUserId(req);
+    const project = await storage.getProject(Number(req.params.id), userId);
     if (!project) return res.status(404).json({ message: 'Project not found' });
 
     const { tenant } = req.body as { tenant: 'source' | 'target' };
@@ -253,7 +257,7 @@ export async function registerRoutes(
   app.get('/api/projects/:id/discover/:type', requireAuth, async (req, res) => {
     try {
       const projectId = parseInt(req.params['id'] as string);
-      const project = await storage.getProject(projectId);
+      const project = await storage.getProjectInternal(projectId);
       if (!project) return res.status(404).json({ message: 'Project not found' });
 
       const missingCreds: string[] = [];
@@ -343,7 +347,7 @@ export async function registerRoutes(
     try {
       const projectId = parseInt(req.params['id'] as string);
       const { adDcHostname, adLdapPort, adBindDn, adBindPassword, adBaseDn, adUseSsl, adTargetOu } = req.body;
-      const updated = await storage.updateProject(projectId, {
+      const updated = await storage.updateProjectInternal(projectId, {
         adDcHostname: adDcHostname || null,
         adLdapPort: adLdapPort ? parseInt(adLdapPort) : 389,
         adBindDn: adBindDn || null,
@@ -365,7 +369,7 @@ export async function registerRoutes(
   app.post('/api/projects/:id/ad-test-connection', requireAuth, async (req, res) => {
     try {
       const projectId = parseInt(req.params['id'] as string);
-      const project = await storage.getProject(projectId);
+      const project = await storage.getProjectInternal(projectId);
       if (!project) return res.status(404).json({ message: 'Project not found' });
 
       const { adDcHostname, adLdapPort, adBindDn, adBindPassword, adBaseDn, adUseSsl } = req.body;
@@ -391,7 +395,7 @@ export async function registerRoutes(
   app.get('/api/projects/:id/entra-ad/discover', requireAuth, async (req, res) => {
     try {
       const projectId = parseInt(req.params['id'] as string);
-      const project = await storage.getProject(projectId);
+      const project = await storage.getProjectInternal(projectId);
       if (!project) return res.status(404).json({ message: 'Project not found' });
 
       if (!project.sourceTenantId || !project.sourceClientId || !project.sourceClientSecret) {
@@ -410,7 +414,7 @@ export async function registerRoutes(
   app.post('/api/projects/:id/entra-ad/migrate', requireAuth, async (req, res) => {
     try {
       const projectId = parseInt(req.params['id'] as string);
-      const project = await storage.getProject(projectId);
+      const project = await storage.getProjectInternal(projectId);
       if (!project) return res.status(404).json({ message: 'Project not found' });
 
       const { users } = req.body as { users: Array<{ upn: string; targetUpn: string; displayName: string; givenName?: string; surname?: string; jobTitle?: string; department?: string; officeLocation?: string; mobilePhone?: string; mail?: string }> };
@@ -473,7 +477,7 @@ export async function registerRoutes(
   app.post('/api/projects/:id/entra-ad/export-ps', requireAuth, async (req, res) => {
     try {
       const projectId = parseInt(req.params['id'] as string);
-      const project = await storage.getProject(projectId);
+      const project = await storage.getProjectInternal(projectId);
       if (!project) return res.status(404).json({ message: 'Project not found' });
 
       const { users } = req.body as { users: Array<{ upn: string; targetUpn: string; displayName: string; givenName?: string; surname?: string; jobTitle?: string; department?: string; officeLocation?: string; mobilePhone?: string; mail?: string }> };
@@ -554,7 +558,7 @@ export async function registerRoutes(
       const updates = result.tenantType === 'source'
         ? { sourceClientId: result.clientId, sourceClientSecret: result.clientSecret }
         : { targetClientId: result.clientId, targetClientSecret: result.clientSecret };
-      await storage.updateProject(result.projectId, updates);
+      await storage.updateProjectInternal(result.projectId, updates);
       res.redirect(`/projects/${result.projectId}?oauth_success=${result.tenantType}&app=${encodeURIComponent(result.displayName)}`);
     } catch (err: any) {
       res.redirect(`/?oauth_error=${encodeURIComponent(err.message)}`);

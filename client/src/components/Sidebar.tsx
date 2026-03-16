@@ -57,13 +57,15 @@ export function Sidebar() {
                <img src={user.profileImageUrl} alt="User" className="w-full h-full object-cover" />
             ) : (
               <div className="w-full h-full flex items-center justify-center text-xs font-bold text-muted-foreground">
-                {user?.username?.substring(0, 2).toUpperCase() || "US"}
+                {user?.firstName ? user.firstName.substring(0, 1).toUpperCase() + (user.lastName?.substring(0, 1).toUpperCase() || '') : user?.email?.substring(0, 2).toUpperCase() || "US"}
               </div>
             )}
           </div>
           <div className="overflow-hidden">
-            <p className="text-sm font-semibold truncate">{user?.username || "Guest User"}</p>
-            <p className="text-xs text-muted-foreground truncate">{user?.username || "Guest User"}</p>
+            <p className="text-sm font-semibold truncate">
+              {user?.firstName ? `${user.firstName}${user.lastName ? ' ' + user.lastName : ''}` : user?.email || "Guest User"}
+            </p>
+            <p className="text-xs text-muted-foreground truncate">{user?.email || ''}</p>
           </div>
         </div>
         
