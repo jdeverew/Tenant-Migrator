@@ -899,10 +899,20 @@ export default function ProjectDetails() {
 
               {/* Tools */}
               {currentView === 'discovery' && (
-                <DiscoveryTab projectId={id} onImport={(newItems) => {
+                <DiscoveryTab projectId={id} existingItems={items || []} onImport={(newItems) => {
                   newItems.forEach(item => createItem(item).catch(() => {}));
                   queryClient.invalidateQueries({ queryKey: [api.items.list.path, id] });
-                  toast({ title: "Imported", description: `${newItems.length} item(s) added to migration queue.` });
+                  const users = newItems.filter((i: any) => i.itemType === 'user').length;
+                  const mailboxes = newItems.filter((i: any) => i.itemType === 'mailbox').length;
+                  const onedrives = newItems.filter((i: any) => i.itemType === 'onedrive').length;
+                  const other = newItems.length - users - mailboxes - onedrives;
+                  const parts = [
+                    users > 0 && `${users} user${users > 1 ? 's' : ''}`,
+                    mailboxes > 0 && `${mailboxes} mailbox${mailboxes > 1 ? 'es' : ''}`,
+                    onedrives > 0 && `${onedrives} OneDrive${onedrives > 1 ? 's' : ''}`,
+                    other > 0 && `${other} other item${other > 1 ? 's' : ''}`,
+                  ].filter(Boolean).join(', ');
+                  toast({ title: "Imported", description: `Added to migration queue: ${parts || `${newItems.length} item(s)`}.` });
                 }} />
               )}
               {currentView === 'mapping' && <MappingRulesTab projectId={id} />}
@@ -1338,10 +1348,11 @@ type DiscoveryType = 'users' | 'onedrive' | 'sharepoint' | 'teams' | 'powerplatf
 
 interface DiscoveryTabProps {
   projectId: number;
+  existingItems: any[];
   onImport: (items: any[]) => void;
 }
 
-function DiscoveryTab({ projectId, onImport }: DiscoveryTabProps) {
+function DiscoveryTab({ projectId, existingItems, onImport }: DiscoveryTabProps) {
   const [activeType, setActiveType] = useState<DiscoveryType>('users');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -1479,7 +1490,29 @@ function DiscoveryTab({ projectId, onImport }: DiscoveryTabProps) {
         return { projectId, sourceIdentity, targetIdentity: targetIdentity || undefined, itemType, status: 'pending' };
       });
 
-      onImport(items);
+      // For users — also auto-add mailbox and OneDrive items for licensed users
+      const extraItems: any[] = [];
+      if (activeType === 'users') {
+        // Build a set of existing (itemType, sourceIdentity) pairs to avoid duplicates
+        const existingSet = new Set(
+          existingItems.map((i: any) => `${i.itemType}::${i.sourceIdentity}`)
+        );
+
+        for (const r of selectedItems) {
+          const sourceIdentity = r.userPrincipalName as string;
+          const targetIdentity = items.find((i: any) => i.sourceIdentity === sourceIdentity)?.targetIdentity;
+
+          if (r.hasMailbox && !existingSet.has(`mailbox::${sourceIdentity}`)) {
+            extraItems.push({ projectId, sourceIdentity, targetIdentity: targetIdentity || undefined, itemType: 'mailbox', status: 'pending' });
+          }
+          if (r.hasOneDrive && !existingSet.has(`onedrive::${sourceIdentity}`)) {
+            extraItems.push({ projectId, sourceIdentity, targetIdentity: targetIdentity || undefined, itemType: 'onedrive', status: 'pending' });
+          }
+        }
+      }
+
+      const allItems = [...items, ...extraItems];
+      onImport(allItems);
       setSelected(new Set());
     } finally {
       setLoading(false);
