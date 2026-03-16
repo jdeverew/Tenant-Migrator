@@ -1,7 +1,7 @@
 import { GraphClient } from "./graph-client";
 import { storage } from "../storage";
 import type { Project, MigrationItem } from "@shared/schema";
-import { readMailboxDelegates, applyMailboxDelegates, convertToSharedMailbox, type ExoConfig } from "./exo-runner";
+import { readMailboxDelegates, applyMailboxDelegates, createSharedMailboxDirect, type ExoConfig } from "./exo-runner";
 
 function logEntry(message: string): string {
   return `[${new Date().toISOString()}] ${message}`;
@@ -1361,189 +1361,67 @@ async function migrateSharedMailbox(
   await updateItemProgress(itemId, 'in_progress', logs);
 
   try {
-    // ── Step 1: resolve source mailbox (shared mailboxes are user objects in Graph) ──
-    logs.push(logEntry(`Looking up source account: ${sourceIdentity}`));
+    // ── Step 1: Read source shared mailbox properties via Graph ──────────
+    logs.push(logEntry(`Reading source shared mailbox: ${sourceIdentity}`));
     await updateItemProgress(itemId, 'in_progress', logs);
 
     let sourceLookupError: string | null = null;
     const sourceUser = await source
-      .get(`/users/${encodeURIComponent(sourceIdentity)}?$select=id,displayName,givenName,surname,mail,userPrincipalName,usageLocation`)
+      .get(`/users/${encodeURIComponent(sourceIdentity)}?$select=id,displayName,mail,userPrincipalName,mailNickname`)
       .catch((e: any) => { sourceLookupError = e.message; return null; });
 
     if (!sourceUser) {
-      const isPermission = sourceLookupError?.includes('403') || sourceLookupError?.toLowerCase().includes('insufficient') || sourceLookupError?.toLowerCase().includes('authorization');
-      const hint = isPermission
-        ? ' — Permission denied. Ensure User.Read.All is granted via admin consent on the SOURCE tenant app registration.'
-        : sourceLookupError
-          ? ` — API error: ${sourceLookupError}`
-          : ' — Account not found. Check that the UPN in the source identity is correct.';
-      throw new Error(`Source shared mailbox "${sourceIdentity}" not found${hint}`);
+      const isPermission = sourceLookupError?.includes('403') || sourceLookupError?.toLowerCase().includes('insufficient');
+      throw new Error(
+        `Source shared mailbox "${sourceIdentity}" not found${isPermission
+          ? ' — Permission denied. Ensure User.Read.All is granted via admin consent on the SOURCE app registration.'
+          : sourceLookupError ? ` — ${sourceLookupError}` : '.'}`
+      );
     }
-    logs.push(logEntry(`✓ Found source account: ${sourceUser.displayName} (${sourceUser.mail || sourceUser.userPrincipalName})`));
+    logs.push(logEntry(`✓ Source: ${sourceUser.displayName} <${sourceUser.mail || sourceUser.userPrincipalName}>`));
 
-    // ── Step 2: determine target UPN ──
-    // Priority: explicit targetIdentity > same alias on target default domain > same as source
-    let targetUpn = targetIdentity || '';
-    const alias = sourceIdentity.split('@')[0];
+    const alias = (sourceUser.mailNickname || sourceIdentity.split('@')[0]).replace(/[^a-zA-Z0-9._-]/g, '');
+    const displayName = sourceUser.displayName || alias;
 
-    // If no explicit target, look up the target tenant's default verified domain and use that
-    if (!targetUpn || targetUpn === sourceIdentity) {
-      logs.push(logEntry(`No explicit target UPN set — looking up target tenant's verified domains...`));
+    // ── Step 2: Determine target SMTP address ────────────────────────────
+    let targetSmtp = (targetIdentity || '').trim();
+    if (!targetSmtp || targetSmtp === sourceIdentity) {
+      logs.push(logEntry(`No explicit target address — looking up target tenant's default domain...`));
       await updateItemProgress(itemId, 'in_progress', logs);
       try {
         const domainsRes = await target.get(`/domains?$select=id,isDefault,isVerified`);
         const domains: any[] = domainsRes.value || [];
-        const defaultDomain = domains.find((d: any) => d.isDefault && d.isVerified)?.id
-          || domains.find((d: any) => d.isVerified && !d.id.endsWith('.onmicrosoft.com'))?.id
-          || domains.find((d: any) => d.isVerified)?.id;
+        const defaultDomain =
+          domains.find((d: any) => d.isDefault && d.isVerified)?.id ||
+          domains.find((d: any) => d.isVerified && !d.id.endsWith('.onmicrosoft.com'))?.id ||
+          domains.find((d: any) => d.isVerified)?.id;
         if (defaultDomain) {
-          targetUpn = `${alias}@${defaultDomain}`;
-          logs.push(logEntry(`  Auto-derived target UPN: ${targetUpn} (using target tenant's default domain "${defaultDomain}")`));
+          targetSmtp = `${alias}@${defaultDomain}`;
+          logs.push(logEntry(`  Target address: ${targetSmtp} (target tenant default domain: ${defaultDomain})`));
         } else {
-          targetUpn = sourceIdentity;
-          logs.push(logEntry(`  ⚠ Could not determine target tenant domain — using source UPN (may fail if domain not verified in target)`));
+          throw new Error('Could not determine a verified domain in the target tenant. Set an explicit target address in the Migration tab.');
         }
       } catch (e: any) {
-        targetUpn = sourceIdentity;
-        logs.push(logEntry(`  ⚠ Domain lookup failed (${e.message}) — using source UPN`));
+        throw new Error(`Domain lookup failed: ${e.message}`);
       }
     }
-    logs.push(logEntry(`Target UPN: ${targetUpn}`));
+    logs.push(logEntry(`Target SMTP: ${targetSmtp}`));
 
-    const targetDomain = targetUpn.split('@')[1] || '';
-    const mailNickname = alias.replace(/[^a-zA-Z0-9]/g, '') || 'sm' + Date.now();
-    const tempPassword = `Migr@tion${Math.random().toString(36).slice(-6).toUpperCase()}1!`;
-
-    // ── Step 3: check if target account already exists ──
-    logs.push(logEntry(`Checking if account already exists in target...`));
-    await updateItemProgress(itemId, 'in_progress', logs);
-    let targetUser = await target.get(`/users/${encodeURIComponent(targetUpn)}?$select=id,userPrincipalName`).catch(() => null);
-
-    if (!targetUser) {
-      logs.push(logEntry(`Creating account in target tenant: ${targetUpn}`));
-      await updateItemProgress(itemId, 'in_progress', logs);
-      const payload: any = {
-        accountEnabled: true,
-        displayName: sourceUser.displayName,
-        mailNickname,
-        userPrincipalName: targetUpn,
-        usageLocation: sourceUser.usageLocation || 'US',
-        passwordProfile: { forceChangePasswordNextSignIn: false, password: tempPassword },
-      };
-      if (sourceUser.givenName) payload.givenName = sourceUser.givenName;
-      if (sourceUser.surname) payload.surname = sourceUser.surname;
-
-      let createError: string | null = null;
-      try {
-        targetUser = await target.post('/users', payload);
-      } catch (e: any) {
-        createError = e.message;
-      }
-
-      // If domain-not-verified error, retry with onmicrosoft.com fallback
-      if (!targetUser && createError) {
-        const isDomainError = createError.toLowerCase().includes('domain') ||
-          createError.toLowerCase().includes('verified') ||
-          createError.toLowerCase().includes('not present') ||
-          createError.toLowerCase().includes('Request_BadRequest');
-
-        if (isDomainError) {
-          logs.push(logEntry(`  Domain error creating with "${targetDomain}": ${createError}`));
-          logs.push(logEntry(`  Attempting fallback: looking up .onmicrosoft.com domain...`));
-          await updateItemProgress(itemId, 'in_progress', logs);
-          try {
-            const domainsRes = await target.get(`/domains?$select=id,isVerified`);
-            const omsDomain = (domainsRes.value || []).find((d: any) => d.id.endsWith('.onmicrosoft.com') && d.isVerified)?.id;
-            if (omsDomain) {
-              const fallbackUpn = `${alias}@${omsDomain}`;
-              logs.push(logEntry(`  Retrying with onmicrosoft.com domain: ${fallbackUpn}`));
-              targetUser = await target.post('/users', { ...payload, userPrincipalName: fallbackUpn });
-              logs.push(logEntry(`✓ Account created using fallback domain: ${fallbackUpn}`));
-              logs.push(logEntry(`  To convert: Set-Mailbox "${fallbackUpn}" -Type Shared`));
-            } else {
-              throw new Error(
-                `Cannot create user "${targetUpn}": ${createError}. ` +
-                `The domain "${targetDomain}" is not verified in the target tenant. ` +
-                `Set the "Target domain" field in the Discovery tab to the correct domain before importing.`
-              );
-            }
-          } catch (fe: any) {
-            if (fe.message.startsWith('Cannot create')) throw fe;
-            throw new Error(`User creation failed: ${createError}. Fallback also failed: ${fe.message}`);
-          }
-        } else {
-          throw new Error(`Failed to create user in target tenant: ${createError}`);
-        }
-      }
-
-      if (targetUser) {
-        logs.push(logEntry(`✓ Account created (ID: ${targetUser.id})`));
-        logs.push(logEntry(`⚠ ACTION REQUIRED: Convert to shared mailbox in Exchange Admin Center`));
-        logs.push(logEntry(`  PowerShell: Set-Mailbox "${targetUser.userPrincipalName || targetUpn}" -Type Shared`));
-        logs.push(logEntry(`  Temporary password (if needed): ${tempPassword}`));
-      }
-    } else {
-      logs.push(logEntry(`Account already exists in target (ID: ${targetUser.id})`));
-    }
-
-    // ── Delegate / calendar permissions ────────────────────────────────────
-    // Graph API v1.0 does not expose FullAccess, SendAs, or SendOnBehalf permissions for
-    // shared mailboxes — these are Exchange-level permissions stored outside Graph.
-    // calendarPermissions works for licensed user mailboxes but returns 403 for shared mailboxes
-    // (unlicensed accounts) because the Exchange identity record is not fully provisioned.
-    // We try it opportunistically; a 403 is expected and handled gracefully.
-    logs.push(logEntry('Attempting calendar permission migration (best-effort for licensed shared mailboxes)...'));
-    let calPermsSrc: any[] = [];
-    try {
-      const calPerms = await source.get(`/users/${sourceUser.id}/calendar/calendarPermissions`);
-      calPermsSrc = calPerms.value || [];
-    } catch (e: any) {
-      const is403 = e.message?.includes('403') || e.message?.toLowerCase().includes('access is denied') || e.message?.toLowerCase().includes('accessdenied');
-      if (is403) {
-        logs.push(logEntry('  Calendar permissions: endpoint not accessible for this shared mailbox (expected — requires a licensed Exchange mailbox). Delegate access must be configured via PowerShell post-migration.'));
-      } else {
-        logs.push(logEntry(`  Calendar permissions skipped: ${e.message}`));
-      }
-    }
-
-    if (calPermsSrc.length > 0) {
-      let permsMigrated = 0;
-      for (const perm of calPermsSrc) {
-        if (perm.emailAddress?.address && perm.role !== 'none') {
-          const memberId = await resolveUserInTenant(target, perm.emailAddress.address);
-          if (memberId) {
-            try {
-              await target.post(`/users/${targetUser.id}/calendar/calendarPermissions`, {
-                emailAddress: perm.emailAddress,
-                role: perm.role,
-                allowedRoles: perm.allowedRoles,
-              });
-              permsMigrated++;
-              logs.push(logEntry(`  ✓ Calendar permission granted to ${perm.emailAddress.address} (role: ${perm.role})`));
-            } catch (e: any) {
-              logs.push(logEntry(`  Calendar permission for ${perm.emailAddress.address} skipped: ${e.message}`));
-            }
-          } else {
-            logs.push(logEntry(`  Calendar permission delegate ${perm.emailAddress.address} not found in target tenant — skipped`));
-          }
-        }
-      }
-      logs.push(logEntry(`  Calendar permissions migrated: ${permsMigrated}/${calPermsSrc.length}`));
-    }
-
-    // ── EXO: Convert user account to shared mailbox ──────────────────────
+    // ── Step 3: Create shared mailbox directly via EXO (or show manual cmd) ──
+    // Shared mailboxes CANNOT be created via Graph API and do NOT need a license.
+    // The correct approach is New-Mailbox -Shared which creates the Exchange object
+    // and corresponding AAD user simultaneously without requiring a license.
     const exo = project?.exoSettings as any;
     const hasSourceExo = !!(exo?.sourceCertPath && exo?.sourceOrg);
     const hasTargetExo = !!(exo?.targetCertPath && exo?.targetOrg);
     const autoDelegate = exo?.autoDelegate !== false;
 
-    let mailboxConverted = false;
+    let mailboxReady = false;  // true when shared mailbox exists and is confirmed ready
 
     if (hasTargetExo) {
       logs.push(logEntry(''));
-      logs.push(logEntry('════ Converting user account to shared mailbox (Exchange Online PowerShell) ════'));
-      logs.push(logEntry(`Running Set-Mailbox -Type Shared on: ${targetUpn}`));
-      logs.push(logEntry('  (Waiting for Exchange identity provisioning — this may take up to 90 seconds...)'));
+      logs.push(logEntry('════ Creating shared mailbox via Exchange Online PowerShell ════'));
+      logs.push(logEntry(`Running: New-Mailbox -Shared -Name "${displayName}" -Alias "${alias}" -PrimarySmtpAddress "${targetSmtp}"`));
       await updateItemProgress(itemId, 'in_progress', logs);
 
       const targetCfg: ExoConfig = {
@@ -1553,41 +1431,43 @@ async function migrateSharedMailbox(
         organization: exo.targetOrg,
       };
 
-      const convertResult = await convertToSharedMailbox(targetCfg, targetUpn);
-      for (const line of convertResult.output) {
+      const createResult = await createSharedMailboxDirect(targetCfg, displayName, alias, targetSmtp);
+      for (const line of createResult.output) {
         logs.push(logEntry(`  ${line}`));
       }
-      if (convertResult.success) {
-        mailboxConverted = true;
-        logs.push(logEntry(`✓ Shared mailbox conversion successful: ${targetUpn}`));
+
+      if (createResult.success || createResult.alreadyExists) {
+        mailboxReady = true;
+        logs.push(logEntry(createResult.alreadyExists
+          ? `✓ Shared mailbox already exists: ${targetSmtp}`
+          : `✓ Shared mailbox created: ${targetSmtp} (no license required)`));
       } else {
-        logs.push(logEntry(`⚠ Shared mailbox conversion errors: ${convertResult.errors.slice(0, 3).join('; ')}`));
-        logs.push(logEntry(`  You can re-run this migration once Exchange provisioning completes (usually within 1-5 minutes).`));
-        logs.push(logEntry(`  Or run manually in Exchange Online PowerShell:`));
-        logs.push(logEntry(`    Set-Mailbox -Identity "${targetUpn}" -Type Shared`));
+        logs.push(logEntry(`⚠ Shared mailbox creation errors: ${createResult.errors.slice(0, 3).join('; ')}`));
+        logs.push(logEntry(`  You can re-run this migration or create it manually:`));
+        logs.push(logEntry(`    New-Mailbox -Shared -Name "${displayName}" -Alias "${alias}" -PrimarySmtpAddress "${targetSmtp}"`));
       }
     } else {
-      // EXO not configured — the account was created as a regular user
+      // EXO not configured — cannot create shared mailbox via Graph
       logs.push(logEntry(''));
-      logs.push(logEntry('════ ACTION REQUIRED: Convert to shared mailbox ════'));
-      logs.push(logEntry(`A regular user account was created at "${targetUpn}" but it has NOT yet been converted to a shared mailbox.`));
-      logs.push(logEntry('Graph API cannot change the mailbox type — you must run this PowerShell command:'));
+      logs.push(logEntry('════ ACTION REQUIRED: Create shared mailbox manually ════'));
+      logs.push(logEntry('Shared mailboxes cannot be created via Microsoft Graph API.'));
+      logs.push(logEntry('Configure Exchange Online PowerShell in the Tenant Config tab to automate this,'));
+      logs.push(logEntry('or run the following command in Exchange Online PowerShell:'));
       logs.push(logEntry(''));
       logs.push(logEntry(`  Connect-ExchangeOnline`));
-      logs.push(logEntry(`  Set-Mailbox -Identity "${targetUpn}" -Type Shared`));
+      logs.push(logEntry(`  New-Mailbox -Shared -Name "${displayName}" -Alias "${alias}" -PrimarySmtpAddress "${targetSmtp}"`));
       logs.push(logEntry(''));
-      logs.push(logEntry('Configure Exchange Online PowerShell in the Tenant Config tab to automate this step.'));
-      logs.push(logEntry('After completing the conversion, you can re-run this migration to apply delegate permissions.'));
+      logs.push(logEntry('No license is required. The command creates the shared mailbox and its AAD object automatically.'));
+      logs.push(logEntry('After creating it, re-run this migration to migrate delegates.'));
       logs.push(logEntry('══════════════════════════════════════════════════════'));
     }
 
-    // ── EXO delegate migration (only runs if conversion succeeded) ────────
+    // ── Step 4: Delegate permissions via EXO ─────────────────────────────
     logs.push(logEntry(''));
-    logs.push(logEntry('════ Delegate Permissions (Exchange Online PowerShell) ════'));
+    logs.push(logEntry('════ Delegate Permissions (FullAccess / SendAs / SendOnBehalf) ════'));
 
-    if (hasSourceExo && hasTargetExo && autoDelegate && mailboxConverted) {
-      // ── Fully automatic: read delegates from source, apply to target ──
-      logs.push(logEntry('Exchange Online PowerShell configured — running automatic delegate migration...'));
+    if (hasSourceExo && hasTargetExo && autoDelegate && mailboxReady) {
+      logs.push(logEntry('Reading delegates from source mailbox...'));
       await updateItemProgress(itemId, 'in_progress', logs);
 
       const sourceCfg: ExoConfig = {
@@ -1603,62 +1483,42 @@ async function migrateSharedMailbox(
         organization: exo.targetOrg,
       };
 
-      // Step 1: Read delegates from source
-      logs.push(logEntry(`Reading delegates from source mailbox: ${sourceIdentity}`));
       const { delegates, errors: readErrors } = await readMailboxDelegates(sourceCfg, sourceIdentity);
-      if (readErrors.length) {
-        logs.push(logEntry(`  Source EXO warnings: ${readErrors.slice(0, 3).join('; ')}`));
-      }
+      if (readErrors.length) logs.push(logEntry(`  Source EXO warnings: ${readErrors.slice(0, 3).join('; ')}`));
+
       if (delegates.length === 0) {
-        logs.push(logEntry('  No delegates found on source mailbox (or none with FullAccess/SendAs/SendOnBehalf).'));
+        logs.push(logEntry('  No delegates found on source mailbox (FullAccess/SendAs/SendOnBehalf).'));
       } else {
         logs.push(logEntry(`  Found ${delegates.length} delegate(s): ${delegates.map(d => d.user).join(', ')}`));
-
-        // Step 2: Apply delegates to target
-        logs.push(logEntry(`Applying delegates to target mailbox: ${targetUpn}`));
-        const applyResult = await applyMailboxDelegates(targetCfg, targetUpn, delegates);
-        for (const line of applyResult.output) {
-          logs.push(logEntry(`  ${line}`));
-        }
-        if (applyResult.errors.length) {
-          logs.push(logEntry(`  EXO errors: ${applyResult.errors.slice(0, 5).join('; ')}`));
-        }
+        const applyResult = await applyMailboxDelegates(targetCfg, targetSmtp, delegates);
+        for (const line of applyResult.output) logs.push(logEntry(`  ${line}`));
+        if (applyResult.errors.length) logs.push(logEntry(`  EXO errors: ${applyResult.errors.slice(0, 5).join('; ')}`));
         logs.push(logEntry(applyResult.success
-          ? `✓ Delegate permissions applied automatically (${delegates.length} delegate(s))`
-          : '⚠ Some delegate permissions may not have been applied — check errors above'));
+          ? `✓ Delegates applied (${delegates.length})`
+          : '⚠ Some delegates may not have been applied — check errors above'));
       }
-    } else if (hasTargetExo && autoDelegate) {
-      // Only target configured — can apply but don't know source delegates
-      logs.push(logEntry('⚠ Source EXO not configured — cannot auto-read source delegates.'));
-      logs.push(logEntry('Configure source certificate in EXO Settings to enable fully automatic delegate migration.'));
-      logs.push(logEntry(''));
-      logs.push(logEntry('Manual commands to apply once you know the delegates:'));
-      logs.push(logEntry(`  Add-MailboxPermission -Identity "${targetUpn}" -User "<delegate>" -AccessRights FullAccess -InheritanceType All -AutoMapping $true`));
-      logs.push(logEntry(`  Add-RecipientPermission -Identity "${targetUpn}" -Trustee "<delegate>" -AccessRights SendAs -Confirm:$false`));
-    } else {
-      // EXO not configured — show manual commands
-      logs.push(logEntry('Exchange Online PowerShell not configured — delegate permissions must be set manually.'));
-      logs.push(logEntry('Configure EXO PowerShell in project Settings to enable automatic delegate migration.'));
-      logs.push(logEntry(''));
-      logs.push(logEntry('Run these commands in Exchange Online PowerShell after connecting:'));
-      logs.push(logEntry(`  # Full Access`));
-      logs.push(logEntry(`  Add-MailboxPermission -Identity "${targetUpn}" -User "<delegate-upn>" -AccessRights FullAccess -InheritanceType All -AutoMapping $true`));
-      logs.push(logEntry(`  # Send As`));
-      logs.push(logEntry(`  Add-RecipientPermission -Identity "${targetUpn}" -Trustee "<delegate-upn>" -AccessRights SendAs -Confirm:$false`));
-      logs.push(logEntry(`  # Send on Behalf`));
-      logs.push(logEntry(`  Set-Mailbox -Identity "${targetUpn}" -GrantSendOnBehalfTo @{add="<delegate-upn>"}`));
+    } else if (!hasSourceExo || !hasTargetExo) {
+      logs.push(logEntry(mailboxReady
+        ? 'EXO not fully configured — delegates must be applied manually after creation:'
+        : 'Configure EXO in Tenant Config to auto-apply delegates. Manual commands:'));
+      logs.push(logEntry(`  Add-MailboxPermission -Identity "${targetSmtp}" -User "<delegate>" -AccessRights FullAccess -InheritanceType All -AutoMapping $true -Confirm:$false`));
+      logs.push(logEntry(`  Add-RecipientPermission -Identity "${targetSmtp}" -Trustee "<delegate>" -AccessRights SendAs -Confirm:$false`));
+      logs.push(logEntry(`  Set-Mailbox -Identity "${targetSmtp}" -GrantSendOnBehalfTo @{add="<delegate>"} -Confirm:$false`));
     }
     logs.push(logEntry('══════════════════════════════════════════════════════════'));
 
-    // ── Final status: only truly 'completed' if the mailbox type was converted ──
-    if (mailboxConverted) {
-      logs.push(logEntry('✓ Shared mailbox fully migrated (account created + converted to shared mailbox + delegates applied)'));
+    // ── Final status ──────────────────────────────────────────────────────
+    if (mailboxReady) {
+      logs.push(logEntry('✓ Shared mailbox migration complete'));
       await updateItemProgress(itemId, 'completed', logs);
     } else {
-      // Account was created (or already existed) but the mailbox type conversion is still needed
-      logs.push(logEntry('⚠ STATUS: Needs Action — account was created but must still be converted to a shared mailbox type.'));
-      logs.push(logEntry('   See the ACTION REQUIRED section above for the PowerShell command, or configure EXO in Tenant Config to automate this.'));
-      await updateItemProgress(itemId, 'needs_action', logs, 'Account created but not yet converted to shared mailbox type. Run Set-Mailbox -Type Shared or configure EXO PowerShell in Tenant Config.');
+      logs.push(logEntry('⚠ STATUS: Needs Action — configure Exchange Online PowerShell in Tenant Config to create this shared mailbox automatically.'));
+      await updateItemProgress(
+        itemId,
+        'needs_action',
+        logs,
+        `Shared mailbox not yet created. Run: New-Mailbox -Shared -Name "${displayName}" -Alias "${alias}" -PrimarySmtpAddress "${targetSmtp}" — or configure EXO PowerShell in Tenant Config.`
+      );
     }
   } catch (err: any) {
     console.error(`[migration] sharedmailbox ${itemId} FAILED:`, err.message);

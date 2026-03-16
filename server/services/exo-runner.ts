@@ -232,7 +232,46 @@ Disconnect-ExchangeOnline -Confirm:$false -ErrorAction SilentlyContinue
   return runPowerShellScript(script);
 }
 
-// Convert a regular user mailbox to a shared mailbox
+// Create a shared mailbox directly — no license required (New-Mailbox -Shared)
+// This is the correct way to create shared mailboxes in Exchange Online.
+// Do NOT create a user first — Exchange creates the AAD object automatically.
+export async function createSharedMailboxDirect(
+  cfg: ExoConfig,
+  displayName: string,
+  alias: string,
+  primarySmtp: string
+): Promise<ExoResult & { alreadyExists?: boolean }> {
+  const esc = (s: string) => s.replace(/'/g, "''");
+  const script = `
+$ErrorActionPreference = 'Stop'
+${buildConnectBlock(cfg)}
+$primarySmtp = '${esc(primarySmtp)}'
+$displayName = '${esc(displayName)}'
+$alias = '${esc(alias)}'
+
+# Check if it already exists as a shared mailbox
+try {
+  $existing = Get-Mailbox -Identity $primarySmtp -ErrorAction Stop
+  if ($existing.RecipientTypeDetails -eq 'SharedMailbox') {
+    Write-Host "ALREADY_EXISTS"
+    Write-Host "Shared mailbox already exists: $primarySmtp"
+  } else {
+    Write-Host "EXISTS_WRONG_TYPE: $($existing.RecipientTypeDetails)"
+  }
+} catch {
+  # Does not exist — create it directly as shared (no license needed)
+  New-Mailbox -Shared -Name $displayName -Alias $alias -PrimarySmtpAddress $primarySmtp -ErrorAction Stop
+  Write-Host "CREATED"
+  Write-Host "Shared mailbox created: $primarySmtp"
+}
+Disconnect-ExchangeOnline -Confirm:$false -ErrorAction SilentlyContinue
+`;
+  const result = await runPowerShellScript(script);
+  const alreadyExists = result.output.some(l => l.includes('ALREADY_EXISTS'));
+  return { ...result, alreadyExists };
+}
+
+// Convert a regular user mailbox to a shared mailbox (legacy — prefer createSharedMailboxDirect)
 export async function convertToSharedMailbox(cfg: ExoConfig, mailboxIdentity: string): Promise<ExoResult> {
   const escaped = mailboxIdentity.replace(/'/g, "''");
   const script = `
