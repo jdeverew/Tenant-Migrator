@@ -701,6 +701,22 @@ export default function ProjectDetails() {
                       ))}
                     </div>
 
+                    {/* Distribution Groups: API limitation warning */}
+                    {key === 'distributiongroups' && (
+                      <div className="flex gap-3 p-3.5 rounded-lg border border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-950/30 text-sm">
+                        <AlertTriangle className="w-4 h-4 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5" />
+                        <div className="space-y-1">
+                          <p className="font-medium text-amber-800 dark:text-amber-300">Graph API cannot create classic distribution lists</p>
+                          <p className="text-amber-700 dark:text-amber-400 text-xs leading-relaxed">
+                            Microsoft's Graph API does not support creating DLs or mail-enabled security groups directly.
+                            By default, this tool attempts MESG creation first and <strong>automatically falls back to an M365 Unified Group</strong> if the API rejects it —
+                            so migrations will always complete.
+                            Toggle the <Building2 className="w-3 h-3 inline" /> button on any item to <strong>skip the MESG attempt</strong> and go straight to M365 Unified Group.
+                          </p>
+                        </div>
+                      </div>
+                    )}
+
                     {/* Items table */}
                     <div className="bg-background rounded-lg border border-border/60 shadow-sm overflow-hidden">
                       {itemsLoading ? (
@@ -804,19 +820,20 @@ export default function ProjectDetails() {
                                 </td>
                                 <td className="px-5 py-3 text-right">
                                   <div className="flex items-center justify-end gap-1">
-                                    {/* Distribution group: toggle M365 upgrade fallback */}
+                                    {/* Distribution group: toggle M365 Group mode (skip MESG attempt) */}
                                     {item.itemType === 'distributiongroup' && item.status !== 'in_progress' && (() => {
                                       const m365On = !!(item.options as any)?.allowM365Upgrade;
                                       return (
                                         <Button
                                           size="sm"
-                                          variant="ghost"
-                                          title={m365On ? 'M365 Group upgrade fallback enabled — click to disable' : 'Enable M365 Group upgrade fallback if security group creation fails'}
-                                          className={m365On ? 'text-cyan-600 dark:text-cyan-400' : 'text-muted-foreground/50'}
+                                          variant={m365On ? 'secondary' : 'ghost'}
+                                          title={m365On ? 'M365 Group mode ON — will skip MESG attempt and create directly as M365 Unified Group. Click to switch back to auto mode.' : 'Auto mode: attempts MESG, falls back to M365 Unified Group if rejected. Click to force M365 Group directly.'}
+                                          className={`gap-1.5 text-xs ${m365On ? 'text-cyan-700 dark:text-cyan-300 font-medium' : 'text-muted-foreground/60'}`}
                                           data-testid={`button-m365upgrade-${item.id}`}
                                           onClick={() => updateItem({ id: item.id, options: { ...(item.options as any || {}), allowM365Upgrade: !m365On } })}
                                         >
-                                          <Building2 className="w-4 h-4" />
+                                          <Building2 className="w-3.5 h-3.5" />
+                                          {m365On ? 'M365' : 'Auto'}
                                         </Button>
                                       );
                                     })()}

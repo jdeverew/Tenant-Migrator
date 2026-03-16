@@ -1240,38 +1240,41 @@ async function migrateDistributionGroup(
       .replace(/[^a-zA-Z0-9]/g, '').slice(0, 59) || `dl${Date.now()}`;
 
     // Create or find group in target.
-    // Graph API v1.0 cannot create classic distribution lists.
-    // Default: create as Mail-Enabled Security Group (closest equivalent).
-    // If allowM365Upgrade=true: fall back to M365 Unified Group when MESG creation is rejected.
+    // Graph API v1.0 CANNOT create classic distribution lists or mail-enabled security groups (MESG).
+    // Behaviour:
+    //   allowM365Upgrade=false (default): attempt MESG first; if the API rejects it (400), auto-fall back
+    //     to M365 Unified Group — the only mail-enabled group type Graph API can actually create.
+    //   allowM365Upgrade=true: skip the MESG attempt entirely and go straight to M365 Unified Group.
+    // Either way the migration will complete; the log records which group type was used.
     // If mailNickname is already taken, retry once with a unique suffix.
     let targetGroup = await resolveGroupInTenant(target, targetName);
     if (!targetGroup) {
-      logs.push(logEntry(`Creating distribution group "${targetName}" in target (as Mail-Enabled Security Group)...`));
       const tryCreate = async (nickname: string) => {
         const base = {
           displayName: sourceGroup.displayName,
           mailNickname: nickname,
           description: (sourceGroup.description || '').slice(0, 1024),
         };
-        // Primary attempt: Mail-Enabled Security Group (closest to classic DL via Graph API)
-        try {
-          const g = await target.post('/groups', { ...base, mailEnabled: true, securityEnabled: true, groupTypes: [] });
-          logs.push(logEntry(`✓ Mail-enabled security group created (ID: ${g.id})`));
-          return g;
-        } catch (e1: any) {
-          logs.push(logEntry(`  Mail-enabled security group creation failed: ${e1.message}`));
-          if (!allowM365Upgrade) {
-            throw new Error(
-              `Could not create as Mail-Enabled Security Group: ${e1.message}. ` +
-              `Graph API cannot create classic distribution lists. ` +
-              `Enable "Upgrade to M365 Group" on this item to fall back to an M365 Unified Group instead.`
-            );
+
+        if (!allowM365Upgrade) {
+          // Attempt 1: Mail-Enabled Security Group
+          logs.push(logEntry(`Creating distribution group "${targetName}" in target (attempting Mail-Enabled Security Group)...`));
+          try {
+            const g = await target.post('/groups', { ...base, mailEnabled: true, securityEnabled: true, groupTypes: [] });
+            logs.push(logEntry(`✓ Mail-enabled security group created (ID: ${g.id})`));
+            return g;
+          } catch (e1: any) {
+            // Graph API returns 400 when MESG/DL creation is not supported — this is expected.
+            logs.push(logEntry(`  MESG creation rejected by Graph API (${e1.message?.slice(0, 120)})`));
+            logs.push(logEntry(`  Graph API does not support creating classic distribution lists. Auto-falling back to M365 Unified Group…`));
           }
+        } else {
+          logs.push(logEntry(`Creating distribution group "${targetName}" as M365 Unified Group (MESG skipped)...`));
         }
-        // Optional fallback: M365 Group (Unified) — only if allowM365Upgrade is enabled
-        logs.push(logEntry(`  Falling back to M365 Unified Group (allowM365Upgrade is enabled)...`));
+
+        // Fallback (or primary when allowM365Upgrade=true): M365 Unified Group
         const g2 = await target.post('/groups', { ...base, mailEnabled: true, securityEnabled: false, groupTypes: ['Unified'], visibility: 'Private' });
-        logs.push(logEntry(`✓ Created as M365 Unified Group (ID: ${g2.id})`));
+        logs.push(logEntry(`✓ Created as M365 Unified Group (ID: ${g2.id}) — Note: Microsoft 365 Groups are the only mail-enabled group type creatable via Graph API`));
         return g2;
       };
 
