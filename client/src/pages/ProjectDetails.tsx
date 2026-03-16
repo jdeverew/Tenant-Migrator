@@ -707,6 +707,7 @@ function TenantCredentialForm({
   const { toast } = useToast();
   const { mutateAsync: updateProject, isPending: isSaving } = useUpdateProject();
   const [showSecret, setShowSecret] = useState(false);
+  const [localTenantId, setLocalTenantId] = useState(tenantId || '');
   const [localClientId, setLocalClientId] = useState(clientId || '');
   const [localClientSecret, setLocalClientSecret] = useState('');
   const hasExistingSecret = !!clientSecret;
@@ -730,23 +731,23 @@ function TenantCredentialForm({
   }, []);
 
   const handleConnect = () => {
-    if (!tenantId?.trim()) {
-      toast({ title: "Tenant ID required", description: "Set a Tenant ID on this project before connecting.", variant: "destructive" });
+    if (!localTenantId?.trim()) {
+      toast({ title: "Tenant ID required", description: "Enter a Tenant ID before connecting.", variant: "destructive" });
       return;
     }
     const params = new URLSearchParams({
       projectId: String(projectId),
       tenantType,
-      tenantId,
+      tenantId: localTenantId,
       appName: `Tenant Migration Tool - ${label}`,
     });
     window.location.href = `/api/oauth/connect?${params}`;
   };
 
   const handleGrantService = async (serviceKey: string) => {
-    if (!tenantId || !localClientId) return;
+    if (!localTenantId || !localClientId) return;
     try {
-      const res = await fetch(`/api/oauth/consent-url?tenantId=${encodeURIComponent(tenantId)}&clientId=${encodeURIComponent(localClientId)}&service=${serviceKey}`);
+      const res = await fetch(`/api/oauth/consent-url?tenantId=${encodeURIComponent(localTenantId)}&clientId=${encodeURIComponent(localClientId)}&service=${serviceKey}`);
       const data = await res.json() as any;
       if (data.url) {
         const popup = window.open(data.url, `consent_${serviceKey}`, 'width=600,height=700,scrollbars=yes');
@@ -765,8 +766,8 @@ function TenantCredentialForm({
   const handleSave = async () => {
     const secretUpdate = localClientSecret ? (tenantType === 'source' ? { sourceClientSecret: localClientSecret } : { targetClientSecret: localClientSecret }) : {};
     const updates = tenantType === 'source'
-      ? { sourceClientId: localClientId, ...secretUpdate }
-      : { targetClientId: localClientId, ...secretUpdate };
+      ? { sourceTenantId: localTenantId, sourceClientId: localClientId, ...secretUpdate }
+      : { targetTenantId: localTenantId, targetClientId: localClientId, ...secretUpdate };
     try {
       await updateProject({ id: projectId, ...updates });
       toast({ title: "Saved", description: `${label} credentials updated.` });
@@ -824,6 +825,20 @@ function TenantCredentialForm({
       </CardHeader>
 
       <CardContent className="space-y-6">
+        {/* Tenant ID — always visible and editable */}
+        <div className="space-y-1.5">
+          <Label className="text-sm font-medium">Directory (Tenant) ID</Label>
+          <Input
+            value={localTenantId}
+            onChange={(e) => setLocalTenantId(e.target.value)}
+            placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+            className="font-mono"
+            autoComplete="off"
+            data-testid={`input-${tenantType}-tenant-id-main`}
+          />
+          <p className="text-xs text-muted-foreground">Found in Microsoft Entra ID &rarr; Overview &rarr; Directory (tenant) ID.</p>
+        </div>
+
         {/* Per-service grant permissions */}
         {isConnected && (
           <div className="space-y-3">
@@ -873,11 +888,6 @@ function TenantCredentialForm({
             Manual credential entry
           </summary>
           <div className="mt-4 space-y-4 pl-1">
-            <div className="space-y-2">
-              <Label className="text-sm font-medium">Tenant ID</Label>
-              <Input value={tenantId} disabled className="font-mono bg-muted/50" data-testid={`input-${tenantType}-tenant-id`} />
-              <p className="text-xs text-muted-foreground">Set when creating the project.</p>
-            </div>
             <div className="space-y-2">
               <Label className="text-sm font-medium">Application (Client) ID</Label>
               <Input

@@ -85,7 +85,7 @@ export default function Projects() {
               <p className="text-muted-foreground mt-2">Manage all your tenant migration projects.</p>
             </div>
             
-            <Dialog open={isOpen} onOpenChange={setIsOpen}>
+            <Dialog open={isOpen} onOpenChange={(open) => { setIsOpen(open); if (!open) form.reset(); }}>
               <DialogTrigger asChild>
                 <Button className="bg-primary hover:bg-primary/90 shadow-lg shadow-primary/20 transition-all">
                   <Plus className="w-4 h-4 mr-2" />
@@ -105,12 +105,12 @@ export default function Projects() {
                   <div className="grid grid-cols-2 gap-4">
                     <div className="space-y-2">
                       <Label htmlFor="source">Source Tenant ID</Label>
-                      <Input id="source" {...form.register("sourceTenantId")} placeholder="source.onmicrosoft.com" />
+                      <Input id="source" {...form.register("sourceTenantId")} placeholder="source.onmicrosoft.com" autoComplete="off" />
                       {form.formState.errors.sourceTenantId && <p className="text-xs text-red-500">{form.formState.errors.sourceTenantId.message}</p>}
                     </div>
                     <div className="space-y-2">
                       <Label htmlFor="target">Target Tenant ID</Label>
-                      <Input id="target" {...form.register("targetTenantId")} placeholder="target.onmicrosoft.com" />
+                      <Input id="target" {...form.register("targetTenantId")} placeholder="target.onmicrosoft.com" autoComplete="off" />
                       {form.formState.errors.targetTenantId && <p className="text-xs text-red-500">{form.formState.errors.targetTenantId.message}</p>}
                     </div>
                   </div>
