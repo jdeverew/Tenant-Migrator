@@ -733,6 +733,93 @@ export async function registerRoutes(
     res.json({ url });
   });
 
+  // === Exchange Online PowerShell Routes ===
+
+  // GET /api/projects/:id/exo-settings
+  app.get('/api/projects/:id/exo-settings', requireAuth, async (req, res) => {
+    const userId = getSessionUserId(req);
+    const project = await storage.getProject(Number(req.params.id), userId);
+    if (!project) return res.status(404).json({ message: 'Project not found' });
+    const exo = (project.exoSettings as any) || {};
+    // Never return passwords — mask them
+    return res.json({
+      sourceCertPath: exo.sourceCertPath || '',
+      sourceCertPassword: exo.sourceCertPassword ? '••••••••' : '',
+      sourceOrg: exo.sourceOrg || '',
+      targetCertPath: exo.targetCertPath || '',
+      targetCertPassword: exo.targetCertPassword ? '••••••••' : '',
+      targetOrg: exo.targetOrg || '',
+      autoDelegate: exo.autoDelegate !== false,
+      configured: !!(exo.targetCertPath && exo.targetOrg),
+    });
+  });
+
+  // PATCH /api/projects/:id/exo-settings
+  app.patch('/api/projects/:id/exo-settings', requireAuth, async (req, res) => {
+    const userId = getSessionUserId(req);
+    const project = await storage.getProject(Number(req.params.id), userId);
+    if (!project) return res.status(404).json({ message: 'Project not found' });
+
+    const existing = (project.exoSettings as any) || {};
+    const body = req.body as {
+      sourceCertPath?: string;
+      sourceCertPassword?: string;
+      sourceOrg?: string;
+      targetCertPath?: string;
+      targetCertPassword?: string;
+      targetOrg?: string;
+      autoDelegate?: boolean;
+    };
+
+    const merged = {
+      sourceCertPath: body.sourceCertPath ?? existing.sourceCertPath,
+      // Keep old password if masked value sent back
+      sourceCertPassword: (body.sourceCertPassword && !body.sourceCertPassword.includes('•'))
+        ? body.sourceCertPassword : existing.sourceCertPassword,
+      sourceOrg: body.sourceOrg ?? existing.sourceOrg,
+      targetCertPath: body.targetCertPath ?? existing.targetCertPath,
+      targetCertPassword: (body.targetCertPassword && !body.targetCertPassword.includes('•'))
+        ? body.targetCertPassword : existing.targetCertPassword,
+      targetOrg: body.targetOrg ?? existing.targetOrg,
+      autoDelegate: body.autoDelegate ?? existing.autoDelegate ?? true,
+    };
+
+    await storage.updateProject(project.id, { exoSettings: merged } as any, userId);
+    return res.json({ ok: true });
+  });
+
+  // POST /api/projects/:id/exo-test — test EXO connection
+  app.post('/api/projects/:id/exo-test', requireAuth, async (req, res) => {
+    const userId = getSessionUserId(req);
+    const project = await storage.getProject(Number(req.params.id), userId);
+    if (!project) return res.status(404).json({ message: 'Project not found' });
+
+    const { tenant } = req.body as { tenant: 'source' | 'target' };
+    const exo = (project.exoSettings as any) || {};
+    const certPath = tenant === 'source' ? exo.sourceCertPath : exo.targetCertPath;
+    const certPassword = tenant === 'source' ? exo.sourceCertPassword : exo.targetCertPassword;
+    const org = tenant === 'source' ? exo.sourceOrg : exo.targetOrg;
+    const clientId = tenant === 'source' ? project.sourceClientId : project.targetClientId;
+
+    if (!certPath || !org || !clientId) {
+      return res.status(400).json({ success: false, message: 'Certificate path, organization domain, and app client ID are required.' });
+    }
+
+    const { testExoConnection } = await import('./services/exo-runner');
+    const result = await testExoConnection({ clientId, certPath, certPassword: certPassword || '', organization: org });
+    return res.json({ success: result.success, output: result.output, errors: result.errors });
+  });
+
+  // POST /api/projects/:id/exo-install-module — install ExchangeOnlineManagement module
+  app.post('/api/projects/:id/exo-install-module', requireAuth, async (req, res) => {
+    const userId = getSessionUserId(req);
+    const project = await storage.getProject(Number(req.params.id), userId);
+    if (!project) return res.status(404).json({ message: 'Project not found' });
+    const { ensureExoModuleInstalled } = await import('./services/exo-runner');
+    const result = await ensureExoModuleInstalled();
+    return res.json(result);
+  });
+
   // === Continuous Sync Routes ===
 
   // GET /api/projects/:id/sync-status  — returns sync settings + per-item sync state

@@ -2423,6 +2423,205 @@ function EntraToAdTab({ projectId, project }: { projectId: number; project: any 
   );
 }
 
+function ExoPowerShellPanel({ projectId }: { projectId: number }) {
+  const { toast } = useToast();
+  const [sourceCertPath, setSourceCertPath] = useState('');
+  const [sourceCertPassword, setSourceCertPassword] = useState('');
+  const [sourceOrg, setSourceOrg] = useState('');
+  const [targetCertPath, setTargetCertPath] = useState('');
+  const [targetCertPassword, setTargetCertPassword] = useState('');
+  const [targetOrg, setTargetOrg] = useState('');
+  const [autoDelegate, setAutoDelegate] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [installing, setInstalling] = useState(false);
+  const [testingSource, setTestingSource] = useState(false);
+  const [testingTarget, setTestingTarget] = useState(false);
+  const [testResult, setTestResult] = useState<{ tenant: string; success: boolean; message: string } | null>(null);
+  const [loaded, setLoaded] = useState(false);
+
+  useEffect(() => {
+    fetch(`/api/projects/${projectId}/exo-settings`, { credentials: 'include' })
+      .then(r => r.json()).then(d => {
+        setSourceCertPath(d.sourceCertPath || '');
+        setSourceCertPassword(d.sourceCertPassword || '');
+        setSourceOrg(d.sourceOrg || '');
+        setTargetCertPath(d.targetCertPath || '');
+        setTargetCertPassword(d.targetCertPassword || '');
+        setTargetOrg(d.targetOrg || '');
+        setAutoDelegate(d.autoDelegate !== false);
+        setLoaded(true);
+      }).catch(() => setLoaded(true));
+  }, [projectId]);
+
+  const handleSave = async () => {
+    setSaving(true);
+    try {
+      await apiRequest('PATCH', `/api/projects/${projectId}/exo-settings`, {
+        sourceCertPath, sourceCertPassword, sourceOrg,
+        targetCertPath, targetCertPassword, targetOrg, autoDelegate,
+      });
+      toast({ title: 'EXO settings saved', description: 'Exchange Online PowerShell configuration updated.' });
+    } catch (e: any) {
+      toast({ title: 'Error', description: e.message, variant: 'destructive' });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleInstall = async () => {
+    setInstalling(true);
+    toast({ title: 'Installing module…', description: 'This may take a minute.' });
+    try {
+      const r = await apiRequest('POST', `/api/projects/${projectId}/exo-install-module`, {});
+      const d = await r.json();
+      toast({ title: d.ok ? 'Module ready' : 'Install failed', description: d.message, variant: d.ok ? 'default' : 'destructive' });
+    } catch (e: any) {
+      toast({ title: 'Error', description: e.message, variant: 'destructive' });
+    } finally {
+      setInstalling(false);
+    }
+  };
+
+  const handleTest = async (tenant: 'source' | 'target') => {
+    if (tenant === 'source') setTestingSource(true); else setTestingTarget(true);
+    setTestResult(null);
+    try {
+      const r = await apiRequest('POST', `/api/projects/${projectId}/exo-test`, { tenant });
+      const d = await r.json();
+      setTestResult({ tenant, success: d.success, message: d.success ? d.output?.join(' ') || 'Connected' : d.errors?.join('; ') || d.message || 'Failed' });
+    } catch (e: any) {
+      setTestResult({ tenant, success: false, message: e.message });
+    } finally {
+      if (tenant === 'source') setTestingSource(false); else setTestingTarget(false);
+    }
+  };
+
+  if (!loaded) return <div className="flex justify-center p-8"><Loader2 className="animate-spin" /></div>;
+
+  return (
+    <Card className="shadow-sm">
+      <CardHeader className="pb-3">
+        <div className="flex items-center gap-2">
+          <Terminal className="w-4 h-4 text-primary" />
+          <CardTitle className="text-base">Exchange Online PowerShell</CardTitle>
+          {targetCertPath && targetOrg && (
+            <span className="inline-flex items-center gap-1 px-2 py-0.5 text-xs font-medium rounded-full bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400">
+              <CheckCircle2 className="w-3 h-3" /> Configured
+            </span>
+          )}
+        </div>
+        <CardDescription className="text-xs leading-relaxed mt-1">
+          Enables automatic migration of delegate permissions (FullAccess, SendAs, SendOnBehalf) that Microsoft Graph API cannot access.
+          Requires a certificate uploaded to each tenant's app registration and the <code className="bg-muted px-1 rounded">Exchange.ManageAsApp</code> API permission.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-5">
+        {/* Setup instructions */}
+        <div className="rounded-lg border border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-950/20 p-3 text-xs space-y-1.5">
+          <p className="font-semibold text-amber-800 dark:text-amber-300">One-time setup per tenant app registration:</p>
+          <ol className="list-decimal pl-4 space-y-1 text-amber-700 dark:text-amber-400">
+            <li>In Entra ID → App registrations → your app → <strong>API permissions</strong>, add <code className="bg-amber-100 dark:bg-amber-900/50 px-1 rounded">Exchange.ManageAsApp</code> (under "Office 365 Exchange Online") and grant admin consent.</li>
+            <li>Go to <strong>Certificates & secrets → Certificates → Upload certificate</strong>. Generate a self-signed cert (PowerShell: <code className="bg-amber-100 dark:bg-amber-900/50 px-1 rounded">New-SelfSignedCertificate</code>) and upload the <code>.cer</code> public key.</li>
+            <li>Save the <code>.pfx</code> private key file on this machine and enter the path below.</li>
+          </ol>
+        </div>
+
+        {/* Install module button */}
+        <div className="flex items-center gap-3">
+          <Button variant="outline" size="sm" onClick={handleInstall} disabled={installing} data-testid="button-exo-install-module">
+            {installing ? <Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" /> : <Download className="w-3.5 h-3.5 mr-1.5" />}
+            Install / verify ExchangeOnlineManagement module
+          </Button>
+          <span className="text-xs text-muted-foreground">Run once to ensure the PowerShell module is available on this machine.</span>
+        </div>
+
+        {/* Auto-delegate toggle */}
+        <div className="flex items-center justify-between rounded-lg border border-border p-3">
+          <div>
+            <p className="text-sm font-medium">Automatically migrate delegates during shared mailbox migration</p>
+            <p className="text-xs text-muted-foreground mt-0.5">When enabled, delegate permissions are read from source and applied to target automatically. Requires both source and target certificates configured below.</p>
+          </div>
+          <Switch checked={autoDelegate} onCheckedChange={setAutoDelegate} data-testid="switch-exo-auto-delegate" />
+        </div>
+
+        {/* Source EXO config */}
+        <div className="space-y-3">
+          <h4 className="text-sm font-semibold flex items-center gap-2"><span className="w-2 h-2 rounded-full bg-blue-500" /> Source Tenant EXO</h4>
+          <div className="grid grid-cols-1 gap-2">
+            <div className="grid grid-cols-2 gap-2">
+              <div className="space-y-1">
+                <Label className="text-xs">Certificate PFX path</Label>
+                <Input value={sourceCertPath} onChange={e => setSourceCertPath(e.target.value)} placeholder="C:\certs\source-migration.pfx" className="h-8 text-sm font-mono" data-testid="input-exo-source-cert-path" />
+              </div>
+              <div className="space-y-1">
+                <Label className="text-xs">PFX password (if any)</Label>
+                <Input type="password" value={sourceCertPassword} onChange={e => setSourceCertPassword(e.target.value)} placeholder="Leave blank if no password" className="h-8 text-sm" data-testid="input-exo-source-cert-password" />
+              </div>
+            </div>
+            <div className="grid grid-cols-2 gap-2 items-end">
+              <div className="space-y-1">
+                <Label className="text-xs">Organization domain</Label>
+                <Input value={sourceOrg} onChange={e => setSourceOrg(e.target.value)} placeholder="sourcecorp.onmicrosoft.com" className="h-8 text-sm font-mono" data-testid="input-exo-source-org" />
+              </div>
+              <Button variant="outline" size="sm" className="h-8" onClick={() => handleTest('source')} disabled={testingSource || !sourceCertPath || !sourceOrg} data-testid="button-exo-test-source">
+                {testingSource ? <Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" /> : <Zap className="w-3.5 h-3.5 mr-1.5" />}
+                Test connection
+              </Button>
+            </div>
+          </div>
+        </div>
+
+        {/* Target EXO config */}
+        <div className="space-y-3">
+          <h4 className="text-sm font-semibold flex items-center gap-2"><span className="w-2 h-2 rounded-full bg-emerald-500" /> Target Tenant EXO</h4>
+          <div className="grid grid-cols-1 gap-2">
+            <div className="grid grid-cols-2 gap-2">
+              <div className="space-y-1">
+                <Label className="text-xs">Certificate PFX path</Label>
+                <Input value={targetCertPath} onChange={e => setTargetCertPath(e.target.value)} placeholder="C:\certs\target-migration.pfx" className="h-8 text-sm font-mono" data-testid="input-exo-target-cert-path" />
+              </div>
+              <div className="space-y-1">
+                <Label className="text-xs">PFX password (if any)</Label>
+                <Input type="password" value={targetCertPassword} onChange={e => setTargetCertPassword(e.target.value)} placeholder="Leave blank if no password" className="h-8 text-sm" data-testid="input-exo-target-cert-password" />
+              </div>
+            </div>
+            <div className="grid grid-cols-2 gap-2 items-end">
+              <div className="space-y-1">
+                <Label className="text-xs">Organization domain</Label>
+                <Input value={targetOrg} onChange={e => setTargetOrg(e.target.value)} placeholder="targetcorp.onmicrosoft.com" className="h-8 text-sm font-mono" data-testid="input-exo-target-org" />
+              </div>
+              <Button variant="outline" size="sm" className="h-8" onClick={() => handleTest('target')} disabled={testingTarget || !targetCertPath || !targetOrg} data-testid="button-exo-test-target">
+                {testingTarget ? <Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" /> : <Zap className="w-3.5 h-3.5 mr-1.5" />}
+                Test connection
+              </Button>
+            </div>
+          </div>
+        </div>
+
+        {/* Test result */}
+        {testResult && (
+          <div className={`flex items-start gap-2 p-3 rounded-lg text-sm ${testResult.success ? 'bg-emerald-50 dark:bg-emerald-950/20 border border-emerald-200 dark:border-emerald-800' : 'bg-red-50 dark:bg-red-950/20 border border-red-200 dark:border-red-800'}`}>
+            {testResult.success
+              ? <CheckCircle2 className="w-4 h-4 text-emerald-600 mt-0.5" />
+              : <XCircle className="w-4 h-4 text-red-600 mt-0.5" />}
+            <div>
+              <span className="font-medium">{testResult.tenant === 'source' ? 'Source' : 'Target'} tenant:</span>{' '}
+              <span className={testResult.success ? 'text-emerald-700 dark:text-emerald-400' : 'text-red-600'}>{testResult.message}</span>
+            </div>
+          </div>
+        )}
+
+        <div className="flex justify-end">
+          <Button onClick={handleSave} disabled={saving} data-testid="button-exo-save">
+            {saving ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : null}
+            Save EXO settings
+          </Button>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
 function TenantConfigTab({ projectId, project }: { projectId: number; project: any }) {
   return (
     <div className="space-y-6">
@@ -2475,6 +2674,8 @@ function TenantConfigTab({ projectId, project }: { projectId: number; project: a
           consentedServices={project.targetConsentedServices}
         />
       </div>
+
+      <ExoPowerShellPanel projectId={projectId} />
     </div>
   );
 }

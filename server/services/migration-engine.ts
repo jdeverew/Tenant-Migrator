@@ -1,6 +1,7 @@
 import { GraphClient } from "./graph-client";
 import { storage } from "../storage";
 import type { Project, MigrationItem } from "@shared/schema";
+import { readMailboxDelegates, applyMailboxDelegates, type ExoConfig } from "./exo-runner";
 
 function logEntry(message: string): string {
   return `[${new Date().toISOString()}] ${message}`;
@@ -1351,7 +1352,8 @@ async function migrateSharedMailbox(
   target: GraphClient,
   sourceIdentity: string,
   targetIdentity: string,
-  itemId: number
+  itemId: number,
+  project?: Project
 ): Promise<void> {
   const logs: string[] = [];
   logs.push(logEntry(`Starting shared mailbox migration: ${sourceIdentity} → ${targetIdentity || '(will derive from target domain)'}`));
@@ -1531,26 +1533,80 @@ async function migrateSharedMailbox(
 
     logs.push(logEntry('✓ Shared mailbox migration complete'));
 
-    // Post-migration PowerShell guide — delegate permissions require Exchange Online PowerShell
+    // ── EXO delegate migration (automatic if configured) ──────────────────
     logs.push(logEntry(''));
-    logs.push(logEntry('════ POST-MIGRATION: Delegate access (Exchange Online PowerShell) ════'));
-    logs.push(logEntry('Graph API does not expose FullAccess, SendAs, or SendOnBehalf permissions.'));
-    logs.push(logEntry('Run the following commands in Exchange Online PowerShell to grant delegate access:'));
-    logs.push(logEntry(''));
-    logs.push(logEntry('  # Connect to Exchange Online (run once per session):'));
-    logs.push(logEntry('  Connect-ExchangeOnline'));
-    logs.push(logEntry(''));
-    logs.push(logEntry(`  # Full Access — lets a user open "${targetUpn}" in Outlook:`));
-    logs.push(logEntry(`  Add-MailboxPermission -Identity "${targetUpn}" -User "<delegate-upn>" -AccessRights FullAccess -InheritanceType All -AutoMapping $true`));
-    logs.push(logEntry(''));
-    logs.push(logEntry(`  # Send As — lets a user send email as "${targetUpn}":`));
-    logs.push(logEntry(`  Add-RecipientPermission -Identity "${targetUpn}" -Trustee "<delegate-upn>" -AccessRights SendAs -Confirm:$false`));
-    logs.push(logEntry(''));
-    logs.push(logEntry(`  # Send on Behalf:`));
-    logs.push(logEntry(`  Set-Mailbox -Identity "${targetUpn}" -GrantSendOnBehalfTo @{add="<delegate-upn>"}`));
-    logs.push(logEntry(''));
-    logs.push(logEntry('  Replace <delegate-upn> with each user who needs access. Repeat for each delegate.'));
-    logs.push(logEntry('════════════════════════════════════════════════════════════════════'));
+    logs.push(logEntry('════ Delegate Permissions (Exchange Online PowerShell) ════'));
+
+    const exo = project?.exoSettings as any;
+    const hasSourceExo = exo?.sourceCertPath && exo?.sourceOrg;
+    const hasTargetExo = exo?.targetCertPath && exo?.targetOrg;
+    const autoDelegate = exo?.autoDelegate !== false; // default true when EXO configured
+
+    if (hasSourceExo && hasTargetExo && autoDelegate) {
+      // ── Fully automatic: read delegates from source, apply to target ──
+      logs.push(logEntry('Exchange Online PowerShell configured — running automatic delegate migration...'));
+      await updateItemProgress(itemId, 'in_progress', logs);
+
+      const sourceCfg: ExoConfig = {
+        clientId: project!.sourceClientId!,
+        certPath: exo.sourceCertPath,
+        certPassword: exo.sourceCertPassword || '',
+        organization: exo.sourceOrg,
+      };
+      const targetCfg: ExoConfig = {
+        clientId: project!.targetClientId!,
+        certPath: exo.targetCertPath,
+        certPassword: exo.targetCertPassword || '',
+        organization: exo.targetOrg,
+      };
+
+      // Step 1: Read delegates from source
+      logs.push(logEntry(`Reading delegates from source mailbox: ${sourceIdentity}`));
+      const { delegates, errors: readErrors } = await readMailboxDelegates(sourceCfg, sourceIdentity);
+      if (readErrors.length) {
+        logs.push(logEntry(`  Source EXO warnings: ${readErrors.slice(0, 3).join('; ')}`));
+      }
+      if (delegates.length === 0) {
+        logs.push(logEntry('  No delegates found on source mailbox (or none with FullAccess/SendAs/SendOnBehalf).'));
+      } else {
+        logs.push(logEntry(`  Found ${delegates.length} delegate(s): ${delegates.map(d => d.user).join(', ')}`));
+
+        // Step 2: Apply delegates to target
+        logs.push(logEntry(`Applying delegates to target mailbox: ${targetUpn}`));
+        const applyResult = await applyMailboxDelegates(targetCfg, targetUpn, delegates);
+        for (const line of applyResult.output) {
+          logs.push(logEntry(`  ${line}`));
+        }
+        if (applyResult.errors.length) {
+          logs.push(logEntry(`  EXO errors: ${applyResult.errors.slice(0, 5).join('; ')}`));
+        }
+        logs.push(logEntry(applyResult.success
+          ? `✓ Delegate permissions applied automatically (${delegates.length} delegate(s))`
+          : '⚠ Some delegate permissions may not have been applied — check errors above'));
+      }
+    } else if (hasTargetExo && autoDelegate) {
+      // Only target configured — can apply but don't know source delegates
+      logs.push(logEntry('⚠ Source EXO not configured — cannot auto-read source delegates.'));
+      logs.push(logEntry('Configure source certificate in EXO Settings to enable fully automatic delegate migration.'));
+      logs.push(logEntry(''));
+      logs.push(logEntry('Manual commands to apply once you know the delegates:'));
+      logs.push(logEntry(`  Add-MailboxPermission -Identity "${targetUpn}" -User "<delegate>" -AccessRights FullAccess -InheritanceType All -AutoMapping $true`));
+      logs.push(logEntry(`  Add-RecipientPermission -Identity "${targetUpn}" -Trustee "<delegate>" -AccessRights SendAs -Confirm:$false`));
+    } else {
+      // EXO not configured — show manual commands
+      logs.push(logEntry('Exchange Online PowerShell not configured — delegate permissions must be set manually.'));
+      logs.push(logEntry('Configure EXO PowerShell in project Settings to enable automatic delegate migration.'));
+      logs.push(logEntry(''));
+      logs.push(logEntry('Run these commands in Exchange Online PowerShell after connecting:'));
+      logs.push(logEntry(`  # Full Access`));
+      logs.push(logEntry(`  Add-MailboxPermission -Identity "${targetUpn}" -User "<delegate-upn>" -AccessRights FullAccess -InheritanceType All -AutoMapping $true`));
+      logs.push(logEntry(`  # Send As`));
+      logs.push(logEntry(`  Add-RecipientPermission -Identity "${targetUpn}" -Trustee "<delegate-upn>" -AccessRights SendAs -Confirm:$false`));
+      logs.push(logEntry(`  # Send on Behalf`));
+      logs.push(logEntry(`  Set-Mailbox -Identity "${targetUpn}" -GrantSendOnBehalfTo @{add="<delegate-upn>"}`));
+    }
+    logs.push(logEntry('══════════════════════════════════════════════════════════'));
+
     await updateItemProgress(itemId, 'completed', logs);
   } catch (err: any) {
     console.error(`[migration] sharedmailbox ${itemId} FAILED:`, err.message);
@@ -1712,7 +1768,7 @@ export async function migrateItem(projectId: number, itemId: number): Promise<vo
         await migrateDistributionGroup(source, target, item.sourceIdentity, targetIdentity, itemId, !!(item.options as any)?.allowM365Upgrade);
         break;
       case 'sharedmailbox':
-        await migrateSharedMailbox(source, target, item.sourceIdentity, targetIdentity, itemId);
+        await migrateSharedMailbox(source, target, item.sourceIdentity, targetIdentity, itemId, project);
         break;
       case 'm365group':
         await migrateM365Group(source, target, item.sourceIdentity, targetIdentity, itemId);

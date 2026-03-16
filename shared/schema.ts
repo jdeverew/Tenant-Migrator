@@ -34,6 +34,16 @@ export const migrationProjects = pgTable("migration_projects", {
   // Continuous sync settings
   syncEnabled: boolean("sync_enabled").default(false),
   syncIntervalMinutes: integer("sync_interval_minutes").default(60),
+  // Exchange Online PowerShell configuration (for delegate permissions)
+  exoSettings: jsonb("exo_settings").$type<{
+    sourceCertPath?: string;
+    sourceCertPassword?: string;
+    sourceOrg?: string;
+    targetCertPath?: string;
+    targetCertPassword?: string;
+    targetOrg?: string;
+    autoDelegate?: boolean;
+  }>(),
 });
 
 // === MIGRATION ITEMS (Users/Resources to migrate) ===
