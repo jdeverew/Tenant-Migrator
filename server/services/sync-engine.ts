@@ -54,7 +54,7 @@ async function syncMailboxDelta(
   let messages: any[] = [];
   try {
     messages = await source.getAllPages<any>(
-      `/users/${sourceUser.id}/messages?$filter=receivedDateTime gt ${since}&$select=id,subject,from,toRecipients,ccRecipients,bccRecipients,receivedDateTime,body,importance,isRead,hasAttachments,internetMessageId,parentFolderId&$orderby=receivedDateTime asc&$top=50`
+      `/users/${sourceUser.id}/messages?$filter=receivedDateTime gt ${since}&$select=id,subject,from,toRecipients,ccRecipients,bccRecipients,receivedDateTime,sentDateTime,body,importance,isRead,hasAttachments,internetMessageId,parentFolderId&$orderby=receivedDateTime asc&$top=50`
     );
   } catch (e: any) {
     logs.push(syncLog(`Failed to fetch messages: ${e.message}`));
@@ -88,8 +88,14 @@ async function syncMailboxDelta(
       } catch { /* fall back to inbox */ }
 
       // Build payload with only writable properties.
-      // receivedDateTime and internetMessageId are read-only in Graph API and must NOT be sent
-      // — including them causes HTTP 400 and silently prevents all message copies.
+      // receivedDateTime and internetMessageId are read-only top-level fields and must NOT be sent.
+      // Instead we use MAPI extended properties to preserve the original timestamps:
+      //   PR_MESSAGE_DELIVERY_TIME (0x0E06) = received time shown in Outlook
+      //   PR_CLIENT_SUBMIT_TIME   (0x0039) = sent time
+      const extProps: { id: string; value: string }[] = [];
+      if (msg.receivedDateTime) extProps.push({ id: 'SystemTime 0x0E06', value: msg.receivedDateTime });
+      if (msg.sentDateTime)     extProps.push({ id: 'SystemTime 0x0039', value: msg.sentDateTime });
+
       const payload: any = {
         subject: msg.subject || '(No subject)',
         body: msg.body || { contentType: 'text', content: '' },
@@ -100,8 +106,10 @@ async function syncMailboxDelta(
         isRead: msg.isRead ?? false,
         isDraft: false,  // Create as received message (not draft) so it appears in inbox properly
       };
-      // from is settable with Mail.ReadWrite Application permission
+      // Restore original sender
       if (msg.from) payload.from = msg.from;
+      // Preserve original timestamps via MAPI extended properties
+      if (extProps.length) payload.singleValueExtendedProperties = extProps;
 
       // Always target inbox (or matched folder) — posting to /messages creates a draft in Drafts
       const endpoint = targetFolderId

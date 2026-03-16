@@ -160,7 +160,7 @@ async function migrateMailbox(
 
       try {
         const messages = await source.getAllPages<any>(
-          `/users/${sourceUser}/mailFolders/${folder.id}/messages?$top=50&$select=id,subject,body,from,toRecipients,ccRecipients,bccRecipients,receivedDateTime,importance,isRead,hasAttachments,flag`
+          `/users/${sourceUser}/mailFolders/${folder.id}/messages?$top=50&$select=id,subject,body,from,toRecipients,ccRecipients,bccRecipients,receivedDateTime,sentDateTime,importance,isRead,hasAttachments,flag`
         );
         totalMessages += messages.length;
         logs.push(logEntry(`Found ${messages.length} messages in "${folderName}"`));
@@ -179,8 +179,16 @@ async function migrateMailbox(
               isDraft: false,
               flag: msg.flag || { flagStatus: 'notFlagged' },
             };
-            // Note: receivedDateTime and internetMessageId are read-only in Graph API
-            // and cannot be set when creating messages. The copy will show today's date.
+            // Restore original sender display
+            if (msg.from) newMessage.from = msg.from;
+            // Preserve original received/sent timestamps via MAPI extended properties.
+            // receivedDateTime is read-only on the top-level Graph resource, but setting
+            // PR_MESSAGE_DELIVERY_TIME (0x0E06) and PR_CLIENT_SUBMIT_TIME (0x0039) via
+            // singleValueExtendedProperties causes Outlook and Graph to display the original times.
+            const extProps: { id: string; value: string }[] = [];
+            if (msg.receivedDateTime) extProps.push({ id: 'SystemTime 0x0E06', value: msg.receivedDateTime });
+            if (msg.sentDateTime)     extProps.push({ id: 'SystemTime 0x0039', value: msg.sentDateTime });
+            if (extProps.length)      newMessage.singleValueExtendedProperties = extProps;
 
             const createdMsg = await target.post(`/users/${targetUser}/mailFolders/${targetFolderId}/messages`, newMessage);
 
