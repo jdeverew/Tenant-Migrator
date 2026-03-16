@@ -263,14 +263,12 @@ export async function handleOAuthCallback(code: string, state: string): Promise<
 
 // ── Build per-service admin consent URL ──────────────────────────────────────
 
-export function buildConsentUrl(tenantId: string, clientId: string, service: ServiceKey): string {
-  // Admin consent for application permissions must use .default — individual scope URLs
-  // cause AADSTS5000224 because they are delegated permission identifiers, not role IDs.
-  // .default tells Azure AD to grant all application permissions configured on the app registration.
-  const params = new URLSearchParams({
-    client_id: clientId,
-    redirect_uri: CONSENT_REDIRECT_URI,
-    scope: 'https://graph.microsoft.com/.default',
-  });
-  return `https://login.microsoftonline.com/${tenantId}/v2.0/adminconsent?${params}`;
+export function buildConsentUrl(tenantId: string, clientId: string, _service: ServiceKey): string {
+  // Use the v1 adminconsent endpoint with NO redirect_uri and NO scope.
+  // The v2.0/adminconsent endpoint requires redirect_uri to be pre-registered on the app,
+  // which causes AADSTS5000224 for any app the user didn't create through our OAuth flow.
+  // The v1 endpoint only needs client_id — Azure shows a built-in success/error page,
+  // and our UI marks the service as granted optimistically after the popup is opened.
+  const params = new URLSearchParams({ client_id: clientId });
+  return `https://login.microsoftonline.com/${tenantId}/adminconsent?${params}`;
 }

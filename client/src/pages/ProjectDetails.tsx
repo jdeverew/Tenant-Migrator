@@ -716,20 +716,6 @@ function TenantCredentialForm({
   const [grantedServices, setGrantedServices] = useState<Set<string>>(new Set());
   const isConnected = !!(clientId && clientSecret);
 
-  // Listen for consent popup messages
-  useEffect(() => {
-    const handler = (e: MessageEvent) => {
-      if (e.origin !== window.location.origin) return;
-      if (e.data?.type === 'consent_success') {
-        toast({ title: "Permissions granted", description: "Admin consent was accepted successfully." });
-      } else if (e.data?.type === 'consent_error') {
-        toast({ title: "Consent error", description: e.data.error || 'Consent was not completed.', variant: "destructive" });
-      }
-    };
-    window.addEventListener('message', handler);
-    return () => window.removeEventListener('message', handler);
-  }, []);
-
   const handleConnect = () => {
     if (!localTenantId?.trim()) {
       toast({ title: "Tenant ID required", description: "Enter a Tenant ID before connecting.", variant: "destructive" });
@@ -750,12 +736,20 @@ function TenantCredentialForm({
       const res = await fetch(`/api/oauth/consent-url?tenantId=${encodeURIComponent(localTenantId)}&clientId=${encodeURIComponent(localClientId)}&service=${serviceKey}`);
       const data = await res.json() as any;
       if (data.url) {
-        const popup = window.open(data.url, `consent_${serviceKey}`, 'width=600,height=700,scrollbars=yes');
+        const popup = window.open(data.url, `consent_${serviceKey}`, 'width=700,height=700,scrollbars=yes');
         if (!popup) {
+          // Popup blocked — open in new tab and ask user to confirm manually
           window.open(data.url, '_blank');
+          toast({ title: "Popup blocked", description: "Consent page opened in a new tab. Grant permissions there, then click the Grant button again." });
         } else {
-          // Mark as granted optimistically after a delay
-          setTimeout(() => setGrantedServices(prev => new Set([...prev, serviceKey])), 5000);
+          toast({ title: "Grant permissions", description: "Sign in as Global Admin, click Accept, then close the window." });
+          // Detect when popup closes — mark as granted regardless (permissions verified at migration time)
+          const timer = setInterval(() => {
+            if (popup.closed) {
+              clearInterval(timer);
+              setGrantedServices(prev => new Set([...prev, serviceKey]));
+            }
+          }, 500);
         }
       }
     } catch {
