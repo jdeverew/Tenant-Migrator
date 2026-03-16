@@ -183,15 +183,28 @@ export interface DiscoveredSharedMailbox {
 }
 
 export async function discoverDistributionGroups(client: GraphClient): Promise<DiscoveredGroup[]> {
-  // Mail-enabled, non-security, non-Unified groups = classic distribution lists
-  // groupTypes MUST be in $select so we can filter out M365 Unified groups
-  const groups = await client.getAllPages<any>(
-    `/groups?$filter=mailEnabled eq true and securityEnabled eq false&$select=id,displayName,mail,mailNickname,description,visibility,groupTypes&$top=100`
-  );
+  const selectFields = 'id,displayName,mail,mailNickname,description,visibility,groupTypes,securityEnabled';
+  // Prefer server-side filter that excludes M365 Unified groups; fall back if NOT() is unsupported.
+  let groups: any[] = [];
+  try {
+    groups = await client.getAllPages<any>(
+      `/groups?$filter=mailEnabled eq true and NOT(groupTypes/any(c:c eq 'Unified'))&$select=${selectFields}&$top=100`
+    );
+  } catch {
+    // Fallback: fetch both DL and mail-enabled security groups separately
+    const [dl, mesg] = await Promise.all([
+      client.getAllPages<any>(`/groups?$filter=mailEnabled eq true and securityEnabled eq false&$select=${selectFields}&$top=100`).catch(() => [] as any[]),
+      client.getAllPages<any>(`/groups?$filter=mailEnabled eq true and securityEnabled eq true&$select=${selectFields}&$top=100`).catch(() => [] as any[]),
+    ]);
+    groups = [...dl, ...mesg];
+  }
   const results: DiscoveredGroup[] = [];
+  const seen = new Set<string>();
   for (const g of groups) {
-    // Exclude M365 Unified groups (mailEnabled + non-security but groupTypes contains 'Unified')
+    // Always exclude M365 Unified groups — they belong to the M365 Groups discovery tab
     if (Array.isArray(g.groupTypes) && g.groupTypes.includes('Unified')) continue;
+    if (seen.has(g.id)) continue;
+    seen.add(g.id);
     let memberCount = 0, ownerCount = 0;
     try { const r = await client.get(`/groups/${g.id}/members?$select=id&$top=999`); memberCount = (r.value || []).length; } catch { }
     try { const r = await client.get(`/groups/${g.id}/owners?$select=id&$top=999`); ownerCount = (r.value || []).length; } catch { }

@@ -1216,25 +1216,28 @@ async function migrateDistributionGroup(
       : sourceGroup.mailNickname || targetIdentity || '')
       .replace(/[^a-zA-Z0-9]/g, '').slice(0, 59) || `dl${Date.now()}`;
 
-    // Create or find distribution group in target
+    // Create or find group in target.
+    // Graph API v1.0 cannot create classic distribution lists (mailEnabled=true, securityEnabled=false, groupTypes=[]).
+    // The only supported mail-enabled non-Unified group type is a Mail-Enabled Security Group (securityEnabled=true).
     let targetGroup = await resolveGroupInTenant(target, targetName);
     if (!targetGroup) {
-      logs.push(logEntry(`Creating distribution group "${targetName}" in target...`));
+      logs.push(logEntry(`Creating mail-enabled security group "${targetName}" in target...`));
+      logs.push(logEntry(`  Note: Graph API does not support creating classic distribution lists. Creating as a Mail-Enabled Security Group instead (functionally equivalent for receiving email).`));
       try {
         targetGroup = await target.post('/groups', {
           displayName: sourceGroup.displayName,
           mailNickname: targetNickname,
           mailEnabled: true,
-          securityEnabled: false,
+          securityEnabled: true,
           groupTypes: [],
           description: sourceGroup.description || '',
         });
-        logs.push(logEntry(`✓ Distribution group created (ID: ${targetGroup.id})`));
+        logs.push(logEntry(`✓ Mail-enabled security group created (ID: ${targetGroup.id})`));
       } catch (e: any) {
-        throw new Error(`Failed to create distribution group: ${e.message}. Note: Exchange admin consent may be required.`);
+        throw new Error(`Failed to create group: ${e.message}. Ensure the app has Group.ReadWrite.All and Directory.ReadWrite.All permissions.`);
       }
     } else {
-      logs.push(logEntry(`Distribution group already exists in target (ID: ${targetGroup.id})`));
+      logs.push(logEntry(`Group already exists in target (ID: ${targetGroup.id})`));
     }
 
     // Add owners first (must be users in target tenant)

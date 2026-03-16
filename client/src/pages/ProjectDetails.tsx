@@ -1033,7 +1033,7 @@ function DiscoveryTab({ projectId, onImport }: DiscoveryTabProps) {
     { id: 'onedrive',           label: 'OneDrive',              icon: HardDrive,  description: 'Discover all provisioned OneDrive accounts with storage usage' },
     { id: 'sharepoint',         label: 'SharePoint Sites',      icon: Globe,      description: 'Discover all SharePoint sites with storage details' },
     { id: 'teams',              label: 'Microsoft Teams',       icon: Users,      description: 'Discover all Teams with member and channel counts' },
-    { id: 'distributiongroups', label: 'Distribution Groups',   icon: AtSign,     description: 'Discover all mail-enabled distribution lists' },
+    { id: 'distributiongroups', label: 'Distribution Groups',   icon: AtSign,     description: 'Discover mail-enabled distribution lists and mail-enabled security groups' },
     { id: 'sharedmailboxes',    label: 'Shared Mailboxes',      icon: Inbox,      description: 'Discover all shared mailboxes in the source tenant' },
     { id: 'm365groups',         label: 'M365 Groups',           icon: Building2,  description: 'Discover all Microsoft 365 Groups with members and owners' },
     { id: 'powerplatform',      label: 'Power Platform',        icon: Zap,        description: 'Discover Power Apps and Power Automate flows' },
