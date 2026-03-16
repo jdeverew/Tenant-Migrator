@@ -12,6 +12,11 @@ export function useMigrationItems(projectId: number) {
       return api.items.list.responses[200].parse(await res.json());
     },
     enabled: !isNaN(projectId),
+    refetchInterval: (query) => {
+      const data = query.state.data as MigrationItem[] | undefined;
+      if (!data) return false;
+      return data.some((i) => i.status === 'in_progress') ? 2000 : false;
+    },
   });
 }
 
@@ -19,8 +24,6 @@ export function useCreateMigrationItem() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: async ({ projectId, ...data }: InsertMigrationItem) => {
-      // The schema expects projectId in the body for the DB insert, but route params handle context
-      // The shared route input omits projectId, so we strip it for validation but might need it for logic
       const validated = api.items.create.input.parse(data);
       const url = buildUrl(api.items.create.path, { projectId });
       
@@ -41,7 +44,6 @@ export function useCreateMigrationItem() {
       return api.items.create.responses[201].parse(await res.json());
     },
     onSuccess: (data, variables) => {
-      // Access projectId from variables passed to mutate()
       queryClient.invalidateQueries({ queryKey: [api.items.list.path, variables.projectId] });
       queryClient.invalidateQueries({ queryKey: [api.projects.stats.path, variables.projectId] });
     },

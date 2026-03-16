@@ -37,6 +37,7 @@ export function useProjectStats(id: number) {
       return api.projects.stats.responses[200].parse(await res.json());
     },
     enabled: !isNaN(id),
+    refetchInterval: 3000,
   });
 }
 

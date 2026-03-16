@@ -487,34 +487,63 @@ export default function ProjectDetails() {
                             <tr className="bg-muted/30 border-b border-border/60">
                               <th className="px-5 py-3 text-left font-semibold text-muted-foreground">Source</th>
                               <th className="px-5 py-3 text-left font-semibold text-muted-foreground">Target</th>
-                              <th className="px-5 py-3 text-left font-semibold text-muted-foreground">Status</th>
+                              <th className="px-5 py-3 text-left font-semibold text-muted-foreground w-52">Status</th>
+                              <th className="px-5 py-3 text-left font-semibold text-muted-foreground">Progress</th>
                               <th className="px-5 py-3 text-right font-semibold text-muted-foreground">Actions</th>
                             </tr>
                           </thead>
                           <tbody className="divide-y divide-border/40">
-                            {svcItems.map((item: MigrationItem) => (
-                              <tr key={item.id} className="hover:bg-muted/20" data-testid={`row-item-${item.id}`}>
-                                <td className="px-5 py-3 font-medium" data-testid={`text-source-${item.id}`}>{item.sourceIdentity}</td>
-                                <td className="px-5 py-3 text-muted-foreground" data-testid={`text-target-${item.id}`}>{item.targetIdentity || 'Auto-mapped'}</td>
-                                <td className="px-5 py-3 min-w-[180px]">
+                            {svcItems.map((item: MigrationItem) => {
+                              const hasBytesData = item.bytesTotal != null && item.bytesTotal > 0;
+                              const pct = item.progressPercent ?? 0;
+                              return (
+                              <tr key={item.id} className={`hover:bg-muted/20 ${item.status === 'in_progress' ? 'bg-blue-50/40 dark:bg-blue-950/20' : ''}`} data-testid={`row-item-${item.id}`}>
+                                <td className="px-5 py-3.5 font-medium" data-testid={`text-source-${item.id}`}>{item.sourceIdentity}</td>
+                                <td className="px-5 py-3.5 text-muted-foreground text-sm" data-testid={`text-target-${item.id}`}>{item.targetIdentity || 'Auto-mapped'}</td>
+                                <td className="px-5 py-3.5">
                                   <div className="flex items-center gap-2">
                                     <StatusBadge status={item.status} />
-                                    {item.status === 'in_progress' && <Loader2 className="w-3 h-3 animate-spin text-blue-500" />}
+                                    {item.status === 'in_progress' && <Loader2 className="w-3.5 h-3.5 animate-spin text-blue-500 flex-shrink-0" />}
                                   </div>
-                                  {item.status === 'in_progress' && item.bytesTotal != null && item.bytesTotal > 0 && (
-                                    <div className="mt-1.5 space-y-0.5">
-                                      <Progress value={item.progressPercent ?? 0} className="h-1" />
-                                      <div className="text-xs text-muted-foreground flex justify-between">
-                                        <span>{formatBytes(item.bytesMigrated)} / {formatBytes(item.bytesTotal)}</span>
-                                        <span className="text-blue-500 font-medium">{item.progressPercent ?? 0}%</span>
-                                      </div>
+                                  {item.status === 'failed' && item.errorDetails && (
+                                    <div className="text-xs text-red-500 mt-1 max-w-[180px] truncate" title={item.errorDetails} data-testid={`text-error-${item.id}`}>{item.errorDetails}</div>
+                                  )}
+                                </td>
+                                <td className="px-5 py-3.5 min-w-[220px]" data-testid={`progress-cell-${item.id}`}>
+                                  {item.status === 'in_progress' && (
+                                    <div className="space-y-1.5">
+                                      {hasBytesData ? (
+                                        <>
+                                          <div className="flex items-center justify-between text-xs font-medium">
+                                            <span className="text-blue-600 dark:text-blue-400 tabular-nums">{formatBytes(item.bytesMigrated)} / {formatBytes(item.bytesTotal)}</span>
+                                            <span className="text-blue-700 dark:text-blue-300 font-bold tabular-nums ml-3" data-testid={`text-pct-${item.id}`}>{pct}%</span>
+                                          </div>
+                                          <Progress value={pct} className="h-2" data-testid={`progress-bar-${item.id}`} />
+                                          <p className="text-[11px] text-muted-foreground">Transferring data…</p>
+                                        </>
+                                      ) : (
+                                        <>
+                                          <div className="h-2 rounded-full bg-blue-100 dark:bg-blue-900/40 overflow-hidden">
+                                            <div className="h-full bg-blue-500 rounded-full animate-pulse w-1/2" />
+                                          </div>
+                                          <p className="text-[11px] text-muted-foreground">Working…</p>
+                                        </>
+                                      )}
                                     </div>
                                   )}
-                                  {item.status === 'completed' && item.bytesMigrated != null && item.bytesMigrated > 0 && (
-                                    <div className="text-xs text-muted-foreground mt-0.5">{formatBytes(item.bytesMigrated)} migrated</div>
+                                  {item.status === 'completed' && (
+                                    <div className="space-y-1">
+                                      <Progress value={100} className="h-2" />
+                                      <p className="text-[11px] text-emerald-600 dark:text-emerald-400 font-medium" data-testid={`bytes-${item.id}`}>
+                                        {hasBytesData ? `${formatBytes(item.bytesMigrated)} migrated` : 'Completed'}
+                                      </p>
+                                    </div>
                                   )}
-                                  {item.status === 'failed' && item.errorDetails && (
-                                    <div className="text-xs text-red-500 mt-0.5 truncate max-w-[200px]" title={item.errorDetails}>{item.errorDetails}</div>
+                                  {item.status === 'pending' && (
+                                    <p className="text-[11px] text-muted-foreground">Queued</p>
+                                  )}
+                                  {item.status === 'failed' && (
+                                    <p className="text-[11px] text-red-500">Migration failed</p>
                                   )}
                                 </td>
                                 <td className="px-5 py-3 text-right">
@@ -542,7 +571,8 @@ export default function ProjectDetails() {
                                   </div>
                                 </td>
                               </tr>
-                            ))}
+                              );
+                            })}
                           </tbody>
                         </table>
                       ) : (
