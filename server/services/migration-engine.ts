@@ -1217,24 +1217,44 @@ async function migrateDistributionGroup(
       .replace(/[^a-zA-Z0-9]/g, '').slice(0, 59) || `dl${Date.now()}`;
 
     // Create or find group in target.
-    // Graph API v1.0 cannot create classic distribution lists (mailEnabled=true, securityEnabled=false, groupTypes=[]).
-    // The only supported mail-enabled non-Unified group type is a Mail-Enabled Security Group (securityEnabled=true).
+    // Graph API v1.0 cannot create classic distribution lists — try in order:
+    //   1. Mail-Enabled Security Group (securityEnabled:true, groupTypes:[])
+    //   2. M365 Group / Unified (always supported with Group.ReadWrite.All)
+    // If mailNickname is already taken, retry with a short unique suffix.
     let targetGroup = await resolveGroupInTenant(target, targetName);
     if (!targetGroup) {
-      logs.push(logEntry(`Creating mail-enabled security group "${targetName}" in target...`));
-      logs.push(logEntry(`  Note: Graph API does not support creating classic distribution lists. Creating as a Mail-Enabled Security Group instead (functionally equivalent for receiving email).`));
-      try {
-        targetGroup = await target.post('/groups', {
+      logs.push(logEntry(`Creating mail-enabled group "${targetName}" in target...`));
+      const tryCreate = async (nickname: string) => {
+        const base = {
           displayName: sourceGroup.displayName,
-          mailNickname: targetNickname,
-          mailEnabled: true,
-          securityEnabled: true,
-          groupTypes: [],
-          description: sourceGroup.description || '',
-        });
-        logs.push(logEntry(`✓ Mail-enabled security group created (ID: ${targetGroup.id})`));
-      } catch (e: any) {
-        throw new Error(`Failed to create group: ${e.message}. Ensure the app has Group.ReadWrite.All and Directory.ReadWrite.All permissions.`);
+          mailNickname: nickname,
+          description: (sourceGroup.description || '').slice(0, 1024),
+        };
+        // Attempt 1: Mail-Enabled Security Group
+        try {
+          const g = await target.post('/groups', { ...base, mailEnabled: true, securityEnabled: true, groupTypes: [] });
+          logs.push(logEntry(`✓ Mail-enabled security group created (ID: ${g.id})`));
+          return g;
+        } catch (e1: any) {
+          logs.push(logEntry(`  Mail-enabled security group attempt failed: ${e1.message}`));
+        }
+        // Attempt 2: M365 Group (Unified) — always supported with Group.ReadWrite.All
+        const g2 = await target.post('/groups', { ...base, mailEnabled: true, securityEnabled: false, groupTypes: ['Unified'], visibility: 'Private' });
+        logs.push(logEntry(`✓ Created as M365 Group (Unified) — Graph API cannot create classic distribution lists (ID: ${g2.id})`));
+        return g2;
+      };
+
+      try {
+        targetGroup = await tryCreate(targetNickname);
+      } catch (err: any) {
+        // Nickname may be taken — retry once with a unique suffix
+        if (err.message?.includes('409') || err.message?.toLowerCase().includes('conflict') || err.message?.includes('already exists') || err.message?.includes('ObjectConflict')) {
+          const uniqueNickname = `${targetNickname.slice(0, 52)}${Date.now().toString(36)}`;
+          logs.push(logEntry(`  Nickname conflict — retrying with unique suffix: ${uniqueNickname}`));
+          targetGroup = await tryCreate(uniqueNickname);
+        } else {
+          throw new Error(`Failed to create group in target: ${err.message}`);
+        }
       }
     } else {
       logs.push(logEntry(`Group already exists in target (ID: ${targetGroup.id})`));
@@ -1398,17 +1418,30 @@ async function migrateM365Group(
     let targetGroup = await resolveGroupInTenant(target, targetName);
     if (!targetGroup) {
       logs.push(logEntry(`Creating M365 Group "${targetName}" in target...`));
-      targetGroup = await target.post('/groups', {
-        displayName: sourceGroup.displayName,
-        mailNickname: targetNickname,
-        mailEnabled: true,
-        securityEnabled: false,
-        groupTypes: ['Unified'],
-        visibility: sourceGroup.visibility || 'Private',
-        description: sourceGroup.description || '',
-      });
+      const createM365 = async (nickname: string) => {
+        const g = await target.post('/groups', {
+          displayName: sourceGroup.displayName,
+          mailNickname: nickname,
+          mailEnabled: true,
+          securityEnabled: false,
+          groupTypes: ['Unified'],
+          visibility: sourceGroup.visibility || 'Private',
+          description: (sourceGroup.description || '').slice(0, 1024),
+        });
+        return g;
+      };
+      try {
+        targetGroup = await createM365(targetNickname);
+      } catch (err: any) {
+        if (err.message?.includes('409') || err.message?.toLowerCase().includes('conflict') || err.message?.includes('ObjectConflict')) {
+          const uniqueNickname = `${targetNickname.slice(0, 52)}${Date.now().toString(36)}`;
+          logs.push(logEntry(`  Nickname conflict — retrying with suffix: ${uniqueNickname}`));
+          targetGroup = await createM365(uniqueNickname);
+        } else {
+          throw new Error(`Failed to create M365 Group: ${err.message}`);
+        }
+      }
       logs.push(logEntry(`✓ M365 Group created (ID: ${targetGroup.id})`));
-
       // Wait briefly for group to fully provision
       await new Promise(r => setTimeout(r, 3000));
     } else {

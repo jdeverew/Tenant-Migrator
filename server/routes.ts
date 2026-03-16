@@ -147,7 +147,7 @@ export async function registerRoutes(
       }
 
       migrateItem(projectId, itemId).catch(err => {
-        console.error(`Background migration failed for item ${itemId}:`, err.message);
+        console.error(`[migration] item ${itemId} (${item.itemType}) FAILED:`, err.message);
       });
 
       res.json({ message: 'Migration started', itemId });
