@@ -264,11 +264,13 @@ export async function handleOAuthCallback(code: string, state: string): Promise<
 // ── Build per-service admin consent URL ──────────────────────────────────────
 
 export function buildConsentUrl(tenantId: string, clientId: string, service: ServiceKey): string {
-  const group = SERVICE_PERMISSION_GROUPS[service];
+  // Admin consent for application permissions must use .default — individual scope URLs
+  // cause AADSTS5000224 because they are delegated permission identifiers, not role IDs.
+  // .default tells Azure AD to grant all application permissions configured on the app registration.
   const params = new URLSearchParams({
     client_id: clientId,
     redirect_uri: CONSENT_REDIRECT_URI,
-    scope: group.scopes.join(' '),
+    scope: 'https://graph.microsoft.com/.default',
   });
   return `https://login.microsoftonline.com/${tenantId}/v2.0/adminconsent?${params}`;
 }
