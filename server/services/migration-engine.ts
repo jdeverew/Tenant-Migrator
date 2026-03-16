@@ -445,33 +445,48 @@ async function migrateSharePoint(
   logs.push(logEntry(`Starting SharePoint migration: ${sourceIdentity} → ${targetIdentity}`));
   await updateItemProgress(itemId, 'in_progress', logs);
 
+  // Convert a full https:// URL or a bare path to the Graph API site path format:
+  // "https://tenant.sharepoint.com/sites/Team" → "tenant.sharepoint.com:/sites/Team"
+  // "tenant.sharepoint.com:/sites/Team"        → unchanged
+  function toGraphSitePath(identity: string): string {
+    try {
+      if (identity.startsWith('http://') || identity.startsWith('https://')) {
+        const u = new URL(identity);
+        return `${u.hostname}:${u.pathname}`;
+      }
+    } catch { /* fall through to returning as-is */ }
+    return identity;
+  }
+
+  async function resolveSite(client: GraphClient, identity: string, label: string): Promise<any> {
+    // Try 1: hostname:/path format (canonical Graph API format)
+    const graphPath = toGraphSitePath(identity);
+    try {
+      return await client.get(`/sites/${graphPath}`);
+    } catch { /* try next */ }
+
+    // Try 2: search by display name or keyword
+    try {
+      const keyword = graphPath.split('/').pop() || identity;
+      const searchResult = await client.get(`/sites?search=${encodeURIComponent(keyword)}`);
+      if (searchResult.value?.length > 0) return searchResult.value[0];
+    } catch { /* try next */ }
+
+    throw new Error(
+      `${label} SharePoint site "${identity}" not found. ` +
+      `Ensure the site exists and the app has Sites.ReadWrite.All permission.`
+    );
+  }
+
   try {
     logs.push(logEntry("Resolving source SharePoint site..."));
     await updateItemProgress(itemId, 'in_progress', logs);
 
-    let sourceSite: any;
-    try {
-      sourceSite = await source.get(`/sites/${sourceIdentity}`);
-    } catch {
-      const searchResult = await source.get(`/sites?search=${encodeURIComponent(sourceIdentity)}`);
-      if (!searchResult.value || searchResult.value.length === 0) {
-        throw new Error(`Source SharePoint site "${sourceIdentity}" not found`);
-      }
-      sourceSite = searchResult.value[0];
-    }
+    const sourceSite = await resolveSite(source, sourceIdentity, 'Source');
     logs.push(logEntry(`Found source site: ${sourceSite.displayName} (${sourceSite.id})`));
 
     logs.push(logEntry("Resolving target SharePoint site..."));
-    let targetSite: any;
-    try {
-      targetSite = await target.get(`/sites/${targetIdentity}`);
-    } catch {
-      const searchResult = await target.get(`/sites?search=${encodeURIComponent(targetIdentity)}`);
-      if (!searchResult.value || searchResult.value.length === 0) {
-        throw new Error(`Target SharePoint site "${targetIdentity}" not found`);
-      }
-      targetSite = searchResult.value[0];
-    }
+    const targetSite = await resolveSite(target, targetIdentity || sourceIdentity, 'Target');
     logs.push(logEntry(`Found target site: ${targetSite.displayName} (${targetSite.id})`));
     await updateItemProgress(itemId, 'in_progress', logs);
 
@@ -547,23 +562,26 @@ async function migrateUser(
 
     logs.push(logEntry(`Creating user in target tenant: ${targetIdentity}`));
 
-    const newUser = await target.post('/users', {
+    // Graph API rejects empty string for givenName/surname — omit the field entirely if blank
+    const userPayload: Record<string, any> = {
       accountEnabled: true,
-      displayName: sourceUser.displayName,
-      givenName: sourceUser.givenName || '',
-      surname: sourceUser.surname || '',
+      displayName: sourceUser.displayName || targetIdentity.split('@')[0],
       mailNickname,
       userPrincipalName: targetIdentity,
-      jobTitle: sourceUser.jobTitle || null,
-      department: sourceUser.department || null,
       usageLocation: sourceUser.usageLocation || 'US',
-      mobilePhone: sourceUser.mobilePhone || null,
-      officeLocation: sourceUser.officeLocation || null,
       passwordProfile: {
         forceChangePasswordNextSignIn: true,
         password: tempPassword,
       },
-    });
+    };
+    if (sourceUser.givenName) userPayload.givenName = sourceUser.givenName;
+    if (sourceUser.surname) userPayload.surname = sourceUser.surname;
+    if (sourceUser.jobTitle) userPayload.jobTitle = sourceUser.jobTitle;
+    if (sourceUser.department) userPayload.department = sourceUser.department;
+    if (sourceUser.mobilePhone) userPayload.mobilePhone = sourceUser.mobilePhone;
+    if (sourceUser.officeLocation) userPayload.officeLocation = sourceUser.officeLocation;
+
+    const newUser = await target.post('/users', userPayload);
 
     logs.push(logEntry(`✓ User created: ${newUser.userPrincipalName} (ID: ${newUser.id})`));
     logs.push(logEntry(`Temporary password: ${tempPassword} (user must change on first login)`));
