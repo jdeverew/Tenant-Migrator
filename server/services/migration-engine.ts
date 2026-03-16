@@ -1484,12 +1484,29 @@ async function migrateSharedMailbox(
       logs.push(logEntry(`Account already exists in target (ID: ${targetUser.id})`));
     }
 
-    // Migrate mailbox members (Full Access = calendar/mailbox delegates stored via Graph calendar permissions)
-    logs.push(logEntry('Migrating Full Access permissions...'));
+    // ── Delegate / calendar permissions ────────────────────────────────────
+    // Graph API v1.0 does not expose FullAccess, SendAs, or SendOnBehalf permissions for
+    // shared mailboxes — these are Exchange-level permissions stored outside Graph.
+    // calendarPermissions works for licensed user mailboxes but returns 403 for shared mailboxes
+    // (unlicensed accounts) because the Exchange identity record is not fully provisioned.
+    // We try it opportunistically; a 403 is expected and handled gracefully.
+    logs.push(logEntry('Attempting calendar permission migration (best-effort for licensed shared mailboxes)...'));
+    let calPermsSrc: any[] = [];
     try {
       const calPerms = await source.get(`/users/${sourceUser.id}/calendar/calendarPermissions`);
+      calPermsSrc = calPerms.value || [];
+    } catch (e: any) {
+      const is403 = e.message?.includes('403') || e.message?.toLowerCase().includes('access is denied') || e.message?.toLowerCase().includes('accessdenied');
+      if (is403) {
+        logs.push(logEntry('  Calendar permissions: endpoint not accessible for this shared mailbox (expected — requires a licensed Exchange mailbox). Delegate access must be configured via PowerShell post-migration.'));
+      } else {
+        logs.push(logEntry(`  Calendar permissions skipped: ${e.message}`));
+      }
+    }
+
+    if (calPermsSrc.length > 0) {
       let permsMigrated = 0;
-      for (const perm of calPerms.value || []) {
+      for (const perm of calPermsSrc) {
         if (perm.emailAddress?.address && perm.role !== 'none') {
           const memberId = await resolveUserInTenant(target, perm.emailAddress.address);
           if (memberId) {
@@ -1500,17 +1517,40 @@ async function migrateSharedMailbox(
                 allowedRoles: perm.allowedRoles,
               });
               permsMigrated++;
-            } catch { /* best-effort */ }
+              logs.push(logEntry(`  ✓ Calendar permission granted to ${perm.emailAddress.address} (role: ${perm.role})`));
+            } catch (e: any) {
+              logs.push(logEntry(`  Calendar permission for ${perm.emailAddress.address} skipped: ${e.message}`));
+            }
+          } else {
+            logs.push(logEntry(`  Calendar permission delegate ${perm.emailAddress.address} not found in target tenant — skipped`));
           }
         }
       }
-      logs.push(logEntry(`Calendar permissions migrated: ${permsMigrated}`));
-    } catch (e: any) {
-      logs.push(logEntry(`Calendar permissions skipped: ${e.message}`));
+      logs.push(logEntry(`  Calendar permissions migrated: ${permsMigrated}/${calPermsSrc.length}`));
     }
 
     logs.push(logEntry('✓ Shared mailbox migration complete'));
-    logs.push(logEntry('Note: Full mailbox delegate permissions (Add-MailboxPermission) require Exchange Online PowerShell — Graph API does not expose this endpoint.'));
+
+    // Post-migration PowerShell guide — delegate permissions require Exchange Online PowerShell
+    logs.push(logEntry(''));
+    logs.push(logEntry('════ POST-MIGRATION: Delegate access (Exchange Online PowerShell) ════'));
+    logs.push(logEntry('Graph API does not expose FullAccess, SendAs, or SendOnBehalf permissions.'));
+    logs.push(logEntry('Run the following commands in Exchange Online PowerShell to grant delegate access:'));
+    logs.push(logEntry(''));
+    logs.push(logEntry('  # Connect to Exchange Online (run once per session):'));
+    logs.push(logEntry('  Connect-ExchangeOnline'));
+    logs.push(logEntry(''));
+    logs.push(logEntry(`  # Full Access — lets a user open "${targetUpn}" in Outlook:`));
+    logs.push(logEntry(`  Add-MailboxPermission -Identity "${targetUpn}" -User "<delegate-upn>" -AccessRights FullAccess -InheritanceType All -AutoMapping $true`));
+    logs.push(logEntry(''));
+    logs.push(logEntry(`  # Send As — lets a user send email as "${targetUpn}":`));
+    logs.push(logEntry(`  Add-RecipientPermission -Identity "${targetUpn}" -Trustee "<delegate-upn>" -AccessRights SendAs -Confirm:$false`));
+    logs.push(logEntry(''));
+    logs.push(logEntry(`  # Send on Behalf:`));
+    logs.push(logEntry(`  Set-Mailbox -Identity "${targetUpn}" -GrantSendOnBehalfTo @{add="<delegate-upn>"}`));
+    logs.push(logEntry(''));
+    logs.push(logEntry('  Replace <delegate-upn> with each user who needs access. Repeat for each delegate.'));
+    logs.push(logEntry('════════════════════════════════════════════════════════════════════'));
     await updateItemProgress(itemId, 'completed', logs);
   } catch (err: any) {
     console.error(`[migration] sharedmailbox ${itemId} FAILED:`, err.message);
