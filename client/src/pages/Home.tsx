@@ -1,3 +1,4 @@
+import { useEffect } from "react";
 import { useProjects } from "@/hooks/use-projects";
 import { Sidebar } from "@/components/Sidebar";
 import { StatusBadge } from "@/components/StatusBadge";
@@ -5,9 +6,21 @@ import { Link } from "wouter";
 import { ArrowUpRight, Clock, CheckCircle2, AlertCircle, Loader2 } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { motion } from "framer-motion";
+import { useToast } from "@/hooks/use-toast";
 
 export default function Home() {
   const { data: projects, isLoading } = useProjects();
+  const { toast } = useToast();
+
+  useEffect(() => {
+    const url = new URL(window.location.href);
+    const oauthError = url.searchParams.get('oauth_error');
+    if (oauthError) {
+      toast({ title: "Connection failed", description: decodeURIComponent(oauthError), variant: "destructive" });
+      url.searchParams.delete('oauth_error');
+      window.history.replaceState({}, '', url.toString());
+    }
+  }, []);
 
   const totalProjects = projects?.length || 0;
   const activeProjects = projects?.filter(p => p.status === 'active').length || 0;

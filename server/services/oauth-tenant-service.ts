@@ -2,7 +2,7 @@
 // Uses Microsoft Graph Command Line Tools as a public client (no secret needed).
 // Microsoft allows http://localhost redirect URIs for public clients per RFC 8252.
 
-import { createHash, randomBytes } from 'crypto';
+import { createHash, randomBytes, createHmac } from 'crypto';
 
 const PUBLIC_CLIENT_ID = '14d82eec-204b-4c2f-b7e8-296a70dab67e'; // Microsoft Graph Command Line Tools
 
@@ -85,7 +85,9 @@ function generateCodeChallenge(verifier: string): string {
   return createHash('sha256').update(verifier).digest('base64url');
 }
 
-// ── In-memory state store ─────────────────────────────────────────────────────
+// ── Self-contained signed OAuth state ────────────────────────────────────────
+// Encodes all flow data into the state param itself, signed with HMAC-SHA256.
+// This survives server restarts (no in-memory storage needed).
 
 interface PendingState {
   tenantId: string;
@@ -96,15 +98,28 @@ interface PendingState {
   createdAt: number;
 }
 
-const pendingStates = new Map<string, PendingState>();
+const STATE_SECRET = process.env.SESSION_SECRET || 'local-dev-secret';
 
-// Clean up states older than 15 minutes
-setInterval(() => {
-  const cutoff = Date.now() - 15 * 60 * 1000;
-  for (const [key, val] of pendingStates) {
-    if (val.createdAt < cutoff) pendingStates.delete(key);
+function encodeState(data: Omit<PendingState, 'createdAt'>): string {
+  const payload = { ...data, createdAt: Date.now() };
+  const encoded = Buffer.from(JSON.stringify(payload)).toString('base64url');
+  const sig = createHmac('sha256', STATE_SECRET).update(encoded).digest('base64url');
+  return `${encoded}.${sig}`;
+}
+
+function decodeState(state: string): PendingState {
+  const dot = state.lastIndexOf('.');
+  if (dot < 0) throw new Error('Malformed OAuth state — please try connecting again.');
+  const encoded = state.slice(0, dot);
+  const sig = state.slice(dot + 1);
+  const expected = createHmac('sha256', STATE_SECRET).update(encoded).digest('base64url');
+  if (sig !== expected) throw new Error('Invalid OAuth state signature — please try connecting again.');
+  const data = JSON.parse(Buffer.from(encoded, 'base64url').toString()) as PendingState;
+  if (Date.now() - data.createdAt > 20 * 60 * 1000) {
+    throw new Error('OAuth session expired (20 min limit) — please try connecting again.');
   }
-}, 5 * 60 * 1000);
+  return data;
+}
 
 // ── Start OAuth2 flow ─────────────────────────────────────────────────────────
 
@@ -114,18 +129,9 @@ export function buildConnectUrl(
   tenantType: 'source' | 'target',
   appName: string,
 ): string {
-  const state = randomBytes(16).toString('base64url');
   const codeVerifier = generateCodeVerifier();
   const codeChallenge = generateCodeChallenge(codeVerifier);
-
-  pendingStates.set(state, {
-    tenantId,
-    projectId,
-    tenantType,
-    codeVerifier,
-    appName,
-    createdAt: Date.now(),
-  });
+  const state = encodeState({ tenantId, projectId, tenantType, codeVerifier, appName });
 
   const params = new URLSearchParams({
     client_id: PUBLIC_CLIENT_ID,
@@ -176,9 +182,7 @@ export interface OAuthCallbackResult {
 }
 
 export async function handleOAuthCallback(code: string, state: string): Promise<OAuthCallbackResult> {
-  const pending = pendingStates.get(state);
-  if (!pending) throw new Error('Invalid or expired OAuth state. Please try connecting again.');
-  pendingStates.delete(state);
+  const pending = decodeState(state);
 
   // 1. Exchange code for token
   const tokenRes = await fetch(`https://login.microsoftonline.com/${pending.tenantId}/oauth2/v2.0/token`, {

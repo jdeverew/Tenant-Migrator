@@ -556,12 +556,24 @@ export async function registerRoutes(
     try {
       const result = await handleOAuthCallback(code, state);
       const updates = result.tenantType === 'source'
-        ? { sourceClientId: result.clientId, sourceClientSecret: result.clientSecret }
-        : { targetClientId: result.clientId, targetClientSecret: result.clientSecret };
+        ? { sourceTenantId: result.tenantId, sourceClientId: result.clientId, sourceClientSecret: result.clientSecret }
+        : { targetTenantId: result.tenantId, targetClientId: result.clientId, targetClientSecret: result.clientSecret };
       await storage.updateProjectInternal(result.projectId, updates);
       res.redirect(`/projects/${result.projectId}?oauth_success=${result.tenantType}&app=${encodeURIComponent(result.displayName)}`);
     } catch (err: any) {
-      res.redirect(`/?oauth_error=${encodeURIComponent(err.message)}`);
+      console.error('[OAuth callback error]', err.message);
+      // Try to extract projectId from the state so we can redirect back to the project page
+      // where the error toast will be visible — otherwise the user lands on the dashboard silently
+      let projectId: number | null = null;
+      try {
+        const dot = state?.lastIndexOf('.');
+        if (dot > 0) {
+          const decoded = JSON.parse(Buffer.from(state.slice(0, dot), 'base64url').toString());
+          if (decoded?.projectId) projectId = decoded.projectId;
+        }
+      } catch { /* ignore */ }
+      const errParam = `oauth_error=${encodeURIComponent(err.message)}`;
+      res.redirect(projectId ? `/projects/${projectId}?${errParam}` : `/?${errParam}`);
     }
   });
 
