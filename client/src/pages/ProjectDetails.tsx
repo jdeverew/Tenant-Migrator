@@ -610,6 +610,22 @@ export default function ProjectDetails() {
                                 </td>
                                 <td className="px-5 py-3 text-right">
                                   <div className="flex items-center justify-end gap-1">
+                                    {/* Distribution group: toggle M365 upgrade fallback */}
+                                    {item.itemType === 'distributiongroup' && item.status !== 'in_progress' && (() => {
+                                      const m365On = !!(item.options as any)?.allowM365Upgrade;
+                                      return (
+                                        <Button
+                                          size="sm"
+                                          variant="ghost"
+                                          title={m365On ? 'M365 Group upgrade fallback enabled — click to disable' : 'Enable M365 Group upgrade fallback if security group creation fails'}
+                                          className={m365On ? 'text-cyan-600 dark:text-cyan-400' : 'text-muted-foreground/50'}
+                                          data-testid={`button-m365upgrade-${item.id}`}
+                                          onClick={() => updateItem({ id: item.id, options: { ...(item.options as any || {}), allowM365Upgrade: !m365On } })}
+                                        >
+                                          <Building2 className="w-4 h-4" />
+                                        </Button>
+                                      );
+                                    })()}
                                     {(item.status === 'pending' || item.status === 'failed') && (
                                       <Button size="sm" variant="ghost" onClick={() => handleMigrateItem(item.id)} title="Start" data-testid={`button-migrate-${item.id}`}>
                                         <Play className="w-4 h-4 text-emerald-600" />

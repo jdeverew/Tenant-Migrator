@@ -47,6 +47,7 @@ export const migrationItems = pgTable("migration_items", {
   bytesMigrated: bigint("bytes_migrated", { mode: "number" }),
   progressPercent: integer("progress_percent"),
   updatedAt: timestamp("updated_at").defaultNow(),
+  options: jsonb("options").$type<Record<string, any>>(),
 });
 
 // === MAPPING RULES ===

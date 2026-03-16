@@ -1191,7 +1191,8 @@ async function migrateDistributionGroup(
   target: GraphClient,
   sourceIdentity: string,
   targetIdentity: string,
-  itemId: number
+  itemId: number,
+  allowM365Upgrade: boolean = false
 ): Promise<void> {
   const logs: string[] = [];
   logs.push(logEntry(`Starting distribution group migration: ${sourceIdentity} → ${targetIdentity || 'same name'}`));
@@ -1217,30 +1218,38 @@ async function migrateDistributionGroup(
       .replace(/[^a-zA-Z0-9]/g, '').slice(0, 59) || `dl${Date.now()}`;
 
     // Create or find group in target.
-    // Graph API v1.0 cannot create classic distribution lists — try in order:
-    //   1. Mail-Enabled Security Group (securityEnabled:true, groupTypes:[])
-    //   2. M365 Group / Unified (always supported with Group.ReadWrite.All)
-    // If mailNickname is already taken, retry with a short unique suffix.
+    // Graph API v1.0 cannot create classic distribution lists.
+    // Default: create as Mail-Enabled Security Group (closest equivalent).
+    // If allowM365Upgrade=true: fall back to M365 Unified Group when MESG creation is rejected.
+    // If mailNickname is already taken, retry once with a unique suffix.
     let targetGroup = await resolveGroupInTenant(target, targetName);
     if (!targetGroup) {
-      logs.push(logEntry(`Creating mail-enabled group "${targetName}" in target...`));
+      logs.push(logEntry(`Creating distribution group "${targetName}" in target (as Mail-Enabled Security Group)...`));
       const tryCreate = async (nickname: string) => {
         const base = {
           displayName: sourceGroup.displayName,
           mailNickname: nickname,
           description: (sourceGroup.description || '').slice(0, 1024),
         };
-        // Attempt 1: Mail-Enabled Security Group
+        // Primary attempt: Mail-Enabled Security Group (closest to classic DL via Graph API)
         try {
           const g = await target.post('/groups', { ...base, mailEnabled: true, securityEnabled: true, groupTypes: [] });
           logs.push(logEntry(`✓ Mail-enabled security group created (ID: ${g.id})`));
           return g;
         } catch (e1: any) {
-          logs.push(logEntry(`  Mail-enabled security group attempt failed: ${e1.message}`));
+          logs.push(logEntry(`  Mail-enabled security group creation failed: ${e1.message}`));
+          if (!allowM365Upgrade) {
+            throw new Error(
+              `Could not create as Mail-Enabled Security Group: ${e1.message}. ` +
+              `Graph API cannot create classic distribution lists. ` +
+              `Enable "Upgrade to M365 Group" on this item to fall back to an M365 Unified Group instead.`
+            );
+          }
         }
-        // Attempt 2: M365 Group (Unified) — always supported with Group.ReadWrite.All
+        // Optional fallback: M365 Group (Unified) — only if allowM365Upgrade is enabled
+        logs.push(logEntry(`  Falling back to M365 Unified Group (allowM365Upgrade is enabled)...`));
         const g2 = await target.post('/groups', { ...base, mailEnabled: true, securityEnabled: false, groupTypes: ['Unified'], visibility: 'Private' });
-        logs.push(logEntry(`✓ Created as M365 Group (Unified) — Graph API cannot create classic distribution lists (ID: ${g2.id})`));
+        logs.push(logEntry(`✓ Created as M365 Unified Group (ID: ${g2.id})`));
         return g2;
       };
 
@@ -1533,7 +1542,7 @@ export async function migrateItem(projectId: number, itemId: number): Promise<vo
         await migrateUser(source, target, item.sourceIdentity, targetIdentity, itemId);
         break;
       case 'distributiongroup':
-        await migrateDistributionGroup(source, target, item.sourceIdentity, targetIdentity, itemId);
+        await migrateDistributionGroup(source, target, item.sourceIdentity, targetIdentity, itemId, !!(item.options as any)?.allowM365Upgrade);
         break;
       case 'sharedmailbox':
         await migrateSharedMailbox(source, target, item.sourceIdentity, targetIdentity, itemId);
