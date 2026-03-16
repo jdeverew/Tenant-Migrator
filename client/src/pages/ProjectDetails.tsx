@@ -1373,6 +1373,7 @@ function DiscoveryResultRow({ item, type, selected, onToggle }: { item: any; typ
         </div>
         <div className="text-xs text-muted-foreground text-right">
           <div>{item.mail || 'No mail'}</div>
+          {item.mailboxType && <div className="capitalize text-muted-foreground/70">{item.mailboxType} mailbox</div>}
         </div>
       </div>
     );

@@ -179,7 +179,8 @@ export interface DiscoveredSharedMailbox {
   displayName: string;
   userPrincipalName: string;
   mail: string | null;
-  memberCount: number; // full-access members
+  mailboxType: string; // 'shared' | 'user' | '' etc.
+  memberCount: number;
 }
 
 export async function discoverDistributionGroups(client: GraphClient): Promise<DiscoveredGroup[]> {
@@ -214,26 +215,44 @@ export async function discoverDistributionGroups(client: GraphClient): Promise<D
 }
 
 export async function discoverSharedMailboxes(client: GraphClient): Promise<DiscoveredSharedMailbox[]> {
-  // Shared mailboxes have no assigned licenses but have a mailbox
-  // Use beta API mailboxType filter where possible, fall back to unlicensed-with-mail heuristic
-  let users: any[] = [];
-  try {
-    const res = await client.get(`https://graph.microsoft.com/beta/users?$select=id,displayName,userPrincipalName,mail,assignedLicenses&$filter=assignedLicenses/$count eq 0 and mail ne null&$count=true&ConsistencyLevel=eventual&$top=999`);
-    users = res.value || [];
-  } catch {
-    // Fallback: get all unlicensed users
-    const all = await client.getAllPages<any>(`/users?$select=id,displayName,userPrincipalName,mail,assignedLicenses&$top=999`);
-    users = all.filter((u: any) => (u.assignedLicenses || []).length === 0 && u.mail && !u.userPrincipalName?.includes('#EXT#'));
-  }
+  // Strategy: fetch all users, filter to candidates (unlicensed + have mail),
+  // then confirm each via mailboxSettings.userPurpose === 'shared'.
+  // We cannot use $count-based OData filters without ConsistencyLevel header support,
+  // so we do the license check client-side.
+  const allUsers = await client.getAllPages<any>(
+    `/users?$select=id,displayName,userPrincipalName,mail,assignedLicenses&$top=999`
+  );
 
+  // Phase 1: cheap client-side filter — unlicensed users with a mail address
+  // Shared mailboxes are almost always unlicensed (admins occasionally assign licenses, so we widen a bit)
+  const candidates = allUsers.filter((u: any) => {
+    if (!u.mail) return false;
+    if (u.userPrincipalName?.includes('#EXT#')) return false; // skip guest accounts
+    const licenseCount = (u.assignedLicenses || []).length;
+    return licenseCount === 0; // unlicensed accounts only
+  });
+
+  // Phase 2: confirm via mailboxSettings.userPurpose for precision
   const results: DiscoveredSharedMailbox[] = [];
-  for (const u of users) {
-    if (!u.mail || u.userPrincipalName?.includes('#EXT#')) continue;
-    // Verify it has a mailbox by checking mailbox settings
+  for (const u of candidates) {
     try {
-      await client.get(`/users/${u.id}/mailboxSettings`);
-      results.push({ id: u.id, displayName: u.displayName || u.userPrincipalName, userPrincipalName: u.userPrincipalName, mail: u.mail, memberCount: 0 });
-    } catch { /* no mailbox */ }
+      const settings = await client.get(`/users/${u.id}/mailboxSettings`);
+      // userPurpose: 'shared' = shared mailbox, 'room' = room mailbox, 'equipment' = equipment
+      // Accept 'shared' explicitly, or any mailbox-enabled unlicensed account if userPurpose is missing
+      const purpose: string = settings?.userPurpose || '';
+      // Accept shared mailboxes; also include accounts where userPurpose isn't returned (empty string)
+      // Skip room, equipment, and confirmed regular user mailboxes
+      if (purpose === 'shared' || purpose === '') {
+        results.push({
+          id: u.id,
+          displayName: u.displayName || u.userPrincipalName,
+          userPrincipalName: u.userPrincipalName,
+          mail: u.mail,
+          mailboxType: purpose || 'shared',
+          memberCount: 0,
+        });
+      }
+    } catch { /* user has no mailbox — skip */ }
   }
   return results;
 }
