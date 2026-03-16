@@ -742,7 +742,7 @@ function TenantCredentialForm({
           window.open(data.url, '_blank');
           toast({ title: "Popup blocked", description: "Consent page opened in a new tab. Grant permissions there, then click the Grant button again." });
         } else {
-          toast({ title: "Grant permissions", description: "Sign in as Global Admin, click Accept, then close the window." });
+          toast({ title: "Select your Global Admin account", description: "An account picker will appear — choose your Global Admin account, then click Accept." });
           // Detect when popup closes — mark as granted regardless (permissions verified at migration time)
           const timer = setInterval(() => {
             if (popup.closed) {

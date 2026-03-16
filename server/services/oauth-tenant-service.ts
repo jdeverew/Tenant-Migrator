@@ -264,11 +264,11 @@ export async function handleOAuthCallback(code: string, state: string): Promise<
 // ── Build per-service admin consent URL ──────────────────────────────────────
 
 export function buildConsentUrl(tenantId: string, clientId: string, _service: ServiceKey): string {
-  // Use the v1 adminconsent endpoint with NO redirect_uri and NO scope.
-  // The v2.0/adminconsent endpoint requires redirect_uri to be pre-registered on the app,
-  // which causes AADSTS5000224 for any app the user didn't create through our OAuth flow.
-  // The v1 endpoint only needs client_id — Azure shows a built-in success/error page,
-  // and our UI marks the service as granted optimistically after the popup is opened.
-  const params = new URLSearchParams({ client_id: clientId });
+  // AADSTS5000224 = "Non-admin user tried the admin consent URL"
+  // Root cause: Azure silently picks up a cached non-admin browser session and immediately
+  // shows the error before any login screen appears.
+  // Fix: prompt=select_account forces the account picker so the user explicitly chooses
+  // their Global Admin account instead of Azure auto-selecting a cached non-admin session.
+  const params = new URLSearchParams({ client_id: clientId, prompt: 'select_account' });
   return `https://login.microsoftonline.com/${tenantId}/adminconsent?${params}`;
 }
