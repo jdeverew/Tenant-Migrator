@@ -6,8 +6,9 @@ import { createHash, randomBytes } from 'crypto';
 
 const PUBLIC_CLIENT_ID = '14d82eec-204b-4c2f-b7e8-296a70dab67e'; // Microsoft Graph Command Line Tools
 
-// Adjust if running on a different port
-const REDIRECT_URI = 'http://localhost:5000/oauth/callback';
+// Microsoft allows any port for the bare http://localhost URI (RFC 8252).
+// We use the root path so we don't need to register a custom path on Microsoft's public client app.
+const REDIRECT_URI = 'http://localhost:5000';
 const CONSENT_REDIRECT_URI = 'http://localhost:5000/oauth/consent-complete';
 
 // ── Per-service permission groups (application permissions) ─────────────────

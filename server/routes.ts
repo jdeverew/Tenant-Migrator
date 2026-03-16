@@ -531,10 +531,15 @@ export async function registerRoutes(
     }
   });
 
-  // Step 2: Microsoft redirects back here with code
-  // Note: no /api prefix — must match registered redirect URI exactly
-  app.get('/oauth/callback', async (req, res) => {
+  // Step 2: Microsoft redirects back to http://localhost:5000 (root) with code.
+  // We intercept at GET / before Vite serves the React app.
+  // The bare http://localhost URI is registered on the Microsoft public client
+  // and Azure AD accepts any port per RFC 8252.
+  app.get('/', async (req, res, next) => {
     const { code, state, error, error_description } = req.query as Record<string, string>;
+
+    // Not an OAuth callback — let Vite serve the React SPA
+    if (!code && !error) return next();
 
     if (error) {
       const msg = error_description || error || 'Authentication failed';
