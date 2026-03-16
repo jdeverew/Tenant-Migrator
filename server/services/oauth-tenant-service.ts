@@ -200,10 +200,13 @@ export async function handleOAuthCallback(code: string, state: string): Promise<
   const token = tokenData.access_token;
   const allAppRoles = Object.values(SERVICE_PERMISSION_GROUPS).flatMap(g => g.appRoleIds);
 
-  // 2. Create app registration with all required permissions
+  // 2. Create app registration with all required permissions and redirect URIs
   const app = await graphPost(token, '/applications', {
     displayName: pending.appName,
     signInAudience: 'AzureADMyOrg',
+    web: {
+      redirectUris: [CONSENT_REDIRECT_URI],
+    },
     requiredResourceAccess: [{
       resourceAppId: MICROSOFT_GRAPH_APP_ID,
       resourceAccess: allAppRoles.map(id => ({ id, type: 'Role' })),

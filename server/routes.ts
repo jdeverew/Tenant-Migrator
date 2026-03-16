@@ -556,13 +556,22 @@ export async function registerRoutes(
     }
   });
 
-  // Consent callback — just close/redirect back
+  // Consent callback — close popup and notify parent window
   app.get('/oauth/consent-complete', (req, res) => {
-    const { error, error_description } = req.query as Record<string, string>;
+    const { error, error_description, admin_consent } = req.query as Record<string, string>;
     if (error) {
-      res.send(`<html><body><script>window.opener?.postMessage({type:'consent_error',error:${JSON.stringify(error_description||error)}},location.origin);window.close();</script><p>Error: ${error_description||error}</p></body></html>`);
+      const msg = error_description || error;
+      if (msg?.includes('500113') || msg?.includes('reply address')) {
+        // Guide user to reconnect
+        const fixMsg = 'The app registration is missing a reply URL. Please click "Connect with Microsoft" again to re-register this tenant, then retry granting permissions.';
+        res.send(`<html><body style="font-family:sans-serif;padding:2rem"><script>window.opener?.postMessage({type:'consent_error',error:${JSON.stringify(fixMsg)}},location.origin);window.close();</script><h3>Setup Required</h3><p>${fixMsg}</p></body></html>`);
+      } else {
+        res.send(`<html><body style="font-family:sans-serif;padding:2rem"><script>window.opener?.postMessage({type:'consent_error',error:${JSON.stringify(msg)}},location.origin);window.close();</script><h3>Error granting consent</h3><p>${msg}</p></body></html>`);
+      }
+    } else if (admin_consent === 'True' || admin_consent === 'true') {
+      res.send(`<html><body style="font-family:sans-serif;padding:2rem"><script>window.opener?.postMessage({type:'consent_success'},location.origin);window.close();</script><h3>✓ Permissions granted</h3><p>Admin consent was successfully granted. You can close this window.</p></body></html>`);
     } else {
-      res.send(`<html><body><script>window.opener?.postMessage({type:'consent_success'},location.origin);window.close();</script><p>Permissions granted. You can close this window.</p></body></html>`);
+      res.send(`<html><body style="font-family:sans-serif;padding:2rem"><script>window.opener?.postMessage({type:'consent_success'},location.origin);window.close();</script><h3>Done</h3><p>You can close this window.</p></body></html>`);
     }
   });
 
